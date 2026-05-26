@@ -1,0 +1,64 @@
+/**
+ * Polaris ships component styles separately from React.
+ * Imported from root.tsx so tokens, typography, and layout apply in the iframe.
+ */
+body {
+  margin: 0;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: inherit;
+}
+
+/* Interactive Overview dashboard metrics (embedded app iframe) */
+.listing-fix-overview-metric {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.listing-fix-overview-metric:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.listing-fix-overview-metric-inner {
+  height: 100%;
+  border-radius: var(--p-border-radius-300);
+  outline: transparent solid var(--p-border-width-025);
+  transition:
+    outline-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.listing-fix-overview-metric:not(:disabled):hover .listing-fix-overview-metric-inner {
+  box-shadow: var(--p-shadow-card);
+}
+
+.listing-fix-overview-metric:focus-visible .listing-fix-overview-metric-inner {
+  outline-style: solid;
+  outline-color: var(--p-color-border-focus);
+  outline-width: var(--p-border-width-025);
+  outline-offset: 2px;
+}
+
+.listing-fix-overview-metric[aria-pressed="true"]:not(:disabled)
+  .listing-fix-overview-metric-inner {
+  outline-color: var(--p-color-border-focus);
+  background: color-mix(
+    in oklab,
+    var(--p-color-bg-fill-transparent-secondary) 60%,
+    transparent
+  );
+}
