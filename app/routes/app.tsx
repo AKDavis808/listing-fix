@@ -9,7 +9,6 @@ import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
 import translations from "@shopify/polaris/locales/en.json";
 
 import { ListingFixAppNav } from "../components/listingFix/ListingFixAppNav";
-import { ListingFixEmbeddedAuthFallback } from "../components/listingFix/ListingFixEmbeddedAuthFallback";
 import { ListingFixEmbeddedBootstrap } from "../components/listingFix/ListingFixEmbeddedBootstrap";
 import { ListingFixErrorBoundary } from "../components/listingFix/ListingFixErrorBoundary";
 import {
@@ -59,32 +58,6 @@ function AppRouteErrorBoundary() {
       meta: { boundary: "app_route" },
     });
   }, [error]);
-
-  if (error instanceof Response) {
-    return boundary.error(error);
-  }
-
-  if (typeof window !== "undefined") {
-    const params = new URLSearchParams(window.location.search);
-    const isEmbedded = params.get("embedded") === "1";
-
-    if (isEmbedded) {
-      return (
-        <AppProvider embedded apiKey={process.env.SHOPIFY_API_KEY ?? ""}>
-          <PolarisAppProvider i18n={translations}>
-            <s-page heading="ListingFix">
-              <s-section>
-                <ListingFixEmbeddedAuthFallback
-                  isEmbedded
-                  hasShop={Boolean(params.get("shop"))}
-                />
-              </s-section>
-            </s-page>
-          </PolarisAppProvider>
-        </AppProvider>
-      );
-    }
-  }
 
   return boundary.error(error);
 }

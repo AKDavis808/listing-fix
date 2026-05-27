@@ -1,69 +1,98 @@
-import { PassThrough } from "stream";
-import { renderToPipeableStream } from "react-dom/server";
-import { ServerRouter } from "react-router";
+import { PassThrough } from "node:stream";
+
+import type { EntryContext } from "react-router";
 import { createReadableStreamFromReadable } from "@react-router/node";
-import { type EntryContext } from "react-router";
+import { ServerRouter } from "react-router";
 import { isbot } from "isbot";
+import type { RenderToPipeableStreamOptions } from "react-dom/server";
+import { renderToPipeableStream } from "react-dom/server";
+
+import { logListingFixEvent } from "./features/listingFix/telemetry";
 import { addDocumentResponseHeaders } from "./shopify.server";
-import { logEmbeddedAuthEvent } from "./features/listingFix/embeddedAuth.server";
 
-export const streamTimeout = 5000;
+export const streamTimeout = 5_000;
 
-export default async function handleRequest(
+export default function handleRequest(
   request: Request,
   responseStatusCode: number,
   responseHeaders: Headers,
-  reactRouterContext: EntryContext
+  routerContext: EntryContext,
 ) {
   const url = new URL(request.url);
   const embedded = url.searchParams.get("embedded") === "1";
   const secFetchDest = request.headers.get("sec-fetch-dest");
 
   if (embedded || secFetchDest === "iframe") {
-    logEmbeddedAuthEvent("iframe_request", request, {
-      source: "entry.server",
-      secFetchDest,
+    logListingFixEvent({
+      action: "iframe_request",
+      shop: url.searchParams.get("shop"),
+      meta: {
+        source: "entry.server",
+        secFetchDest,
+        pathname: url.pathname,
+      },
     });
   }
 
   addDocumentResponseHeaders(request, responseHeaders);
-  const userAgent = request.headers.get("user-agent");
-  const callbackName = isbot(userAgent ?? '')
-    ? "onAllReady"
-    : "onShellReady";
+
+  // https://httpwg.org/specs/rfc9110.html#HEAD
+  if (request.method.toUpperCase() === "HEAD") {
+    return new Response(null, {
+      status: responseStatusCode,
+      headers: responseHeaders,
+    });
+  }
 
   return new Promise((resolve, reject) => {
+    let shellRendered = false;
+    const userAgent = request.headers.get("user-agent");
+
+    const readyOption: keyof RenderToPipeableStreamOptions =
+      (userAgent && isbot(userAgent)) || routerContext.isSpaMode
+        ? "onAllReady"
+        : "onShellReady";
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined = setTimeout(
+      () => abort(),
+      streamTimeout + 1000,
+    );
+
     const { pipe, abort } = renderToPipeableStream(
-      <ServerRouter
-        context={reactRouterContext}
-        url={request.url}
-      />,
+      <ServerRouter context={routerContext} url={request.url} />,
       {
-        [callbackName]: () => {
-          const body = new PassThrough();
+        [readyOption]() {
+          shellRendered = true;
+          const body = new PassThrough({
+            final(callback) {
+              clearTimeout(timeoutId);
+              timeoutId = undefined;
+              callback();
+            },
+          });
           const stream = createReadableStreamFromReadable(body);
 
           responseHeaders.set("Content-Type", "text/html");
+
+          pipe(body);
+
           resolve(
             new Response(stream, {
               headers: responseHeaders,
               status: responseStatusCode,
-            })
+            }),
           );
-          pipe(body);
         },
-        onShellError(error) {
+        onShellError(error: unknown) {
           reject(error);
         },
-        onError(error) {
+        onError(error: unknown) {
           responseStatusCode = 500;
-          console.error(error);
+          if (shellRendered) {
+            console.error(error);
+          }
         },
-      }
+      },
     );
-
-    // Automatically timeout the React renderer after 6 seconds, which ensures
-    // React has enough time to flush down the rejected boundary contents
-    setTimeout(abort, streamTimeout + 1000);
   });
 }

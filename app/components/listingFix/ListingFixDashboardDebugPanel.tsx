@@ -1,7 +1,8 @@
 import { Banner, BlockStack, Box, Card, Text } from "@shopify/polaris";
 
-/** Temporary embedded-dashboard diagnostics — remove after blank-body fix is verified. */
-export const SHOW_DASHBOARD_DEBUG_PANEL = true;
+/** Temporary embedded-dashboard diagnostics — disabled in production builds. */
+export const SHOW_DASHBOARD_DEBUG_PANEL =
+  typeof process !== "undefined" && process.env.NODE_ENV === "development";
 
 export function ListingFixDashboardDebugPanel({
   loaderOk,
