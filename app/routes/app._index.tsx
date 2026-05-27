@@ -85,6 +85,7 @@ import {
   FIRST_SCAN_BODY,
   FIRST_SCAN_HEADING,
   REASSURANCE,
+  AI_DISCLOSURE,
 } from "../features/listingFix/trustCopy";
 
 import { authenticate } from "../shopify.server";
@@ -1592,6 +1593,9 @@ export default function ListingFixHomePage() {
                     AI-generated ideas for review only. Shopify updates occur only when
                     you click <strong>Apply to Shopify</strong> beside a suggestion — nothing
                     syncs automatically and there is no bulk apply.
+                  </Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    {AI_DISCLOSURE}
                   </Text>
                   <InlineStack gap="200" wrap blockAlign="center">
                     <Badge tone={aiLimitReached ? "critical" : "info"}>

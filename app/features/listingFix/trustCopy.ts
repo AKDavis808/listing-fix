@@ -44,3 +44,15 @@ export const BETA_FOOTER_LINES = [
   "Daily usage limits apply during beta testing.",
   "Feedback is welcome as we improve stability and polish.",
 ] as const;
+
+export const LEGAL_LINKS = {
+  privacy: "https://www.akdavisdesigns.com/listingfix/privacy",
+  terms: "https://www.akdavisdesigns.com/listingfix/terms",
+  support: "https://www.akdavisdesigns.com/listingfix/support",
+} as const;
+
+export const AI_DISCLOSURE =
+  "AI suggestions are generated from selected product listing details and should be reviewed before applying.";
+
+export const BETA_DISCLOSURE =
+  "ListingFix is currently in beta. Features, limits, and recommendations may change as we improve the app.";

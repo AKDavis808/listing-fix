@@ -17,7 +17,7 @@ import {
 } from "@shopify/polaris-icons";
 
 import {
-  LISTING_FIX_BETA_LABEL,
+  AI_DISCLOSURE,
   TRUST_PANEL_POINTS,
   TRUST_PANEL_TITLE,
   TRUST_SECTIONS,
@@ -76,6 +76,12 @@ export function ListingFixTrustPanel() {
               );
             })}
           </InlineGrid>
+
+          <Box padding="300" className="listing-fix-trust-disclosure">
+            <Text as="p" variant="bodySm" tone="subdued">
+              {AI_DISCLOSURE}
+            </Text>
+          </Box>
         </BlockStack>
       </Card>
     </Box>

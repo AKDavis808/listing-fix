@@ -27,6 +27,8 @@ import {
   MAX_FEEDBACK_MESSAGE_LENGTH,
   type BetaFeedbackType,
 } from "../../features/listingFix/feedbackTypes";
+import { LEGAL_LINKS } from "../../features/listingFix/trustCopy";
+import { ListingFixLegalLinks } from "./ListingFixLegalLinks";
 
 type ListingFixFeedbackContextValue = {
   openFeedback: (initialType?: BetaFeedbackType) => void;
@@ -263,19 +265,29 @@ export function ListingFixFeedbackFooter() {
 
   return (
     <Box padding="400" className="listing-fix-feedback-footer">
-      <InlineStack align="space-between" blockAlign="center" gap="300" wrap>
-        <Text as="p" variant="bodySm" tone="subdued">
-          ListingFix Beta — feedback helps us improve stability and clarity.
-        </Text>
-        <InlineStack gap="200" wrap>
-          <Button variant="plain" onClick={openFeedback}>
-            Send Feedback
-          </Button>
-          <Button variant="plain" onClick={() => openFeedback("bug")}>
-            Report an Issue
-          </Button>
+      <BlockStack gap="300">
+        <InlineStack align="space-between" blockAlign="center" gap="300" wrap>
+          <Text as="p" variant="bodySm" tone="subdued">
+            ListingFix Beta — feedback helps us improve stability and clarity.
+          </Text>
+          <InlineStack gap="200" wrap>
+            <Button variant="plain" onClick={openFeedback}>
+              Send Feedback
+            </Button>
+            <Button variant="plain" onClick={() => openFeedback("bug")}>
+              Report an Issue
+            </Button>
+            <Button
+              variant="plain"
+              url={LEGAL_LINKS.support}
+              target="_blank"
+            >
+              Support
+            </Button>
+          </InlineStack>
         </InlineStack>
-      </InlineStack>
+        <ListingFixLegalLinks />
+      </BlockStack>
     </Box>
   );
 }

@@ -111,6 +111,12 @@ body {
   );
 }
 
+.listing-fix-trust-disclosure {
+  border: 1px solid var(--p-color-border-secondary);
+  border-radius: var(--p-border-radius-200);
+  background: var(--p-color-bg-surface-secondary);
+}
+
 .listing-fix-action-reassurance {
   padding: var(--p-space-200) var(--p-space-300);
   border-radius: var(--p-border-radius-200);

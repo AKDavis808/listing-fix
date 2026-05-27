@@ -8,7 +8,7 @@ import {
 
 import { BETA_USAGE_MESSAGE } from "../../features/listingFix/usageLimits";
 import type { ListingFixDailyUsageSnapshot } from "../../features/listingFix/usageLimits";
-import { BETA_FOOTER_LINES } from "../../features/listingFix/trustCopy";
+import { BETA_FOOTER_LINES, BETA_DISCLOSURE } from "../../features/listingFix/trustCopy";
 import { ListingFixBetaBadge } from "./ListingFixBetaBadge";
 
 export function ListingFixBetaUsageCard({
@@ -32,6 +32,9 @@ export function ListingFixBetaUsageCard({
           </InlineStack>
         </InlineStack>
         <BlockStack gap="100">
+          <Text as="p" variant="bodySm" tone="subdued">
+            {BETA_DISCLOSURE}
+          </Text>
           <Text as="p" variant="bodySm" tone="subdued">
             {BETA_USAGE_MESSAGE}
           </Text>
