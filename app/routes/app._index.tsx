@@ -77,6 +77,10 @@ import {
   getRemainingUsage,
   incrementScanUsage,
 } from "../features/listingFix/usage.server";
+import { listRecentScanSessions, saveCatalogScanSession } from "../features/listingFix/scanHistory.server";
+import type { CatalogScanSessionSummary } from "../features/listingFix/scanHistoryTypes";
+import { formatScanSessionLabel } from "../features/listingFix/scanHistoryTypes";
+import { ListingFixScanHistoryPanel } from "../components/listingFix/ListingFixScanHistoryPanel";
 import {
   FIRST_SCAN_BODY,
   FIRST_SCAN_HEADING,
@@ -103,6 +107,7 @@ import type {
   ApplyListingFieldActionData,
   ApplyListingFieldKind,
 } from "./app.apply-listing-field";
+import type { RestoreScanActionData } from "./app.scan-history";
 
 const APPLY_FIELD_LABELS: Record<ApplyListingFieldKind, string> = {
   title: "Suggested title",
@@ -134,6 +139,7 @@ type LoaderFailure = {
   products: [];
   shop: string;
   usage: ListingFixDailyUsageSnapshot;
+  scanHistory: CatalogScanSessionSummary[];
 };
 
 type LoaderSuccess = {
@@ -142,6 +148,7 @@ type LoaderSuccess = {
   products: ClientCatalogProductRow[];
   shop: string;
   usage: ListingFixDailyUsageSnapshot;
+  scanHistory: CatalogScanSessionSummary[];
 };
 
 export type ListingFixHomeLoaderData = LoaderFailure | LoaderSuccess;
@@ -155,6 +162,7 @@ type AuditActionFail = {
 type AuditActionSuccess = {
   ok: true;
   audited: AuditedCatalogProductRow[];
+  sessionId?: string;
 };
 
 export type ListingFixAuditActionData =
@@ -170,6 +178,7 @@ export const loader = async ({
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
   const usage = await getRemainingUsage(shop);
+  const scanHistory = await listRecentScanSessions(shop);
   const timer = startTimer("load-catalog");
 
   const result = await fetchCatalogProducts(admin, 25);
@@ -186,6 +195,7 @@ export const loader = async ({
       products: [],
       shop,
       usage,
+      scanHistory,
     };
   }
 
@@ -195,6 +205,7 @@ export const loader = async ({
     products: result.products.map(toClientCatalogRow),
     shop,
     usage,
+    scanHistory,
   };
 };
 
@@ -204,6 +215,7 @@ export const action = async ({
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
   const timer = startTimer("scan-products");
+  const scanStartedAt = new Date();
   logListingFixEvent({ action: "scan_start", shop });
 
   const formData = await request.formData();
@@ -252,14 +264,32 @@ export const action = async ({
       return { ...toClientCatalogRow(p), ...audit, recommendations };
     });
 
+    const productRows = audited.map((row) => ({
+      id: typeof row.id === "string" ? row.id : "",
+    }));
+    const catalogFingerprint = productRows
+      .map((row) => row.id)
+      .filter(Boolean)
+      .join("|");
+    const durationMs = endTimer(timer);
+
+    const sessionId = await saveCatalogScanSession({
+      shopDomain: shop,
+      audited,
+      products: productRows.filter((row) => row.id.length > 0),
+      catalogFingerprint,
+      scanStartedAt,
+      scanDurationMs: durationMs,
+    });
+
     logListingFixEvent({
       action: "scan_success",
       shop,
-      durationMs: endTimer(timer),
-      meta: { productCount: audited.length },
+      durationMs,
+      meta: { productCount: audited.length, sessionId },
     });
 
-    return { ok: true, audited };
+    return { ok: true, audited, sessionId: sessionId ?? undefined };
   } catch (error) {
     logListingFixEvent({
       action: "scan_failure",
@@ -277,6 +307,7 @@ const EMPTY_CATALOG_IMG =
 export default function ListingFixHomePage() {
   const data = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ListingFixAuditActionData>();
+  const historyFetcher = useFetcher<RestoreScanActionData>();
   const aiFetcher = useFetcher<AiSuggestionsActionData>();
   const applyFetcher = useFetcher<ApplyListingFieldActionData>();
 
@@ -324,6 +355,14 @@ export default function ListingFixHomePage() {
   const [dashboardFilter, setDashboardFilter] =
     useState<DashboardCatalogFilter>({ mode: "none" });
   const [detailProductId, setDetailProductId] = useState<string | null>(null);
+  const [activeScanSessionId, setActiveScanSessionId] = useState<string | null>(
+    null,
+  );
+  const [restoringSessionId, setRestoringSessionId] = useState<string | null>(
+    null,
+  );
+
+  const lastRestoreResultRef = useRef<RestoreScanActionData | null>(null);
 
   const dashboardFilterRef = useRef(dashboardFilter);
   dashboardFilterRef.current = dashboardFilter;
@@ -400,6 +439,9 @@ export default function ListingFixHomePage() {
       next,
       normalizeDashboardFilter(dashboardFilterRef.current),
     );
+    if (fetcher.data.sessionId) {
+      setActiveScanSessionId(fetcher.data.sessionId);
+    }
     logListingFixEvent({
       action: "scan_success",
       shop: shopDomain,
@@ -412,6 +454,54 @@ export default function ListingFixHomePage() {
     shopify.toast.show("Listing scan complete");
     void revalidator.revalidate();
   }, [fetcher.state, fetcher.data, fingerprint, revalidator, shopDomain, shopify]);
+
+  const handleRestoreScan = useCallback(
+    (sessionId: string) => {
+      if (historyFetcher.state !== "idle") return;
+      setRestoringSessionId(sessionId);
+      const form = new FormData();
+      form.set("intent", "restore-scan");
+      form.set("sessionId", sessionId);
+      historyFetcher.submit(form, {
+        method: "post",
+        action: "/app/scan-history",
+      });
+    },
+    [historyFetcher],
+  );
+
+  useEffect(() => {
+    if (historyFetcher.state !== "idle" || !historyFetcher.data) return;
+    if (lastRestoreResultRef.current === historyFetcher.data) return;
+    lastRestoreResultRef.current = historyFetcher.data;
+    setRestoringSessionId(null);
+
+    if (!historyFetcher.data.ok) {
+      shopify.toast.show(
+        merchantFacingError(historyFetcher.data.error, "restore-scan"),
+        { isError: true },
+      );
+      return;
+    }
+
+    const { payload, session } = historyFetcher.data;
+    setAuditByProductId(payload.audits);
+    setDashboardFilter(normalizeDashboardFilter(payload.dashboardFilter));
+    setActiveScanSessionId(session.id);
+    persistDashboardSnapshot(
+      fingerprint,
+      payload.audits,
+      normalizeDashboardFilter(payload.dashboardFilter),
+    );
+    shopify.toast.show("Earlier scan results restored");
+    void revalidator.revalidate();
+  }, [
+    fingerprint,
+    historyFetcher.data,
+    historyFetcher.state,
+    revalidator,
+    shopify,
+  ]);
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
@@ -1049,6 +1139,11 @@ export default function ListingFixHomePage() {
       ? ""
       : catalogFilterBadgeLabel(dashboardFilterForUi);
   const { openFeedback } = useListingFixFeedback();
+  const scanHistory = data.scanHistory;
+  const activeScanSession = useMemo(
+    () => scanHistory.find((session) => session.id === activeScanSessionId) ?? null,
+    [activeScanSessionId, scanHistory],
+  );
 
   return (
     <Page
@@ -1220,6 +1315,25 @@ export default function ListingFixHomePage() {
                     </ListingFixDashboardMetricTile>
                   </InlineGrid>
                 </BlockStack>
+
+                {data.ok ? (
+                  <ListingFixScanHistoryPanel
+                    sessions={scanHistory}
+                    activeSessionId={activeScanSessionId}
+                    restoringSessionId={restoringSessionId}
+                    onRestore={handleRestoreScan}
+                  />
+                ) : null}
+
+                {activeScanSession ? (
+                  <Banner tone="info" title="Viewing restored scan">
+                    <Text as="p" variant="bodyMd">
+                      Showing results from{" "}
+                      {formatScanSessionLabel(activeScanSession.scanCompletedAt)}.
+                      Run Scan Products anytime to refresh with your latest catalog.
+                    </Text>
+                  </Banner>
+                ) : null}
 
                 {!hasScannedSession && !scanning ? (
                   <ListingFixFirstScanPrompt

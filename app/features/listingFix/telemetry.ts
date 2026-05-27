@@ -15,7 +15,10 @@ export type ListingFixTelemetryAction =
   | "usage_increment"
   | "usage_remaining"
   | "feedback_submitted"
-  | "feedback_failed";
+  | "feedback_failed"
+  | "scan_saved"
+  | "scan_restored"
+  | "scan_deleted";
 
 export type ListingFixTelemetryEvent = {
   action: ListingFixTelemetryAction;

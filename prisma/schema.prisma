@@ -58,3 +58,24 @@ model BetaFeedback {
   @@index([shopDomain])
   @@index([createdAt])
 }
+
+model CatalogScanSession {
+  id                  String    @id @default(cuid())
+  shopDomain          String
+  scanStartedAt       DateTime
+  scanCompletedAt     DateTime?
+  productCount        Int       @default(0)
+  issueCount          Int       @default(0)
+  averageScore        Int?
+  scanSummary         String?
+  scanResultsJson     Json
+  catalogFingerprint  String?
+  dashboardFilterJson Json?
+  scanDurationMs      Int?
+  topIssue            String?
+  improvementCount    Int?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([shopDomain, scanCompletedAt])
+}

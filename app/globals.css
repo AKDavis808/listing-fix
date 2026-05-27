@@ -145,3 +145,36 @@ body {
     transparent
   );
 }
+
+.listing-fix-scan-history .Polaris-Card {
+  border: 1px solid var(--p-color-border-secondary);
+  background: var(--p-color-bg-surface-secondary);
+}
+
+.listing-fix-scan-history-row {
+  border: 1px solid var(--p-color-border-secondary);
+  border-radius: var(--p-border-radius-200);
+  background: var(--p-color-bg-surface);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+
+.listing-fix-scan-history-row:hover {
+  border-color: color-mix(
+    in oklab,
+    var(--p-color-border-success) 45%,
+    var(--p-color-border-secondary)
+  );
+  box-shadow: var(--p-shadow-100);
+}
+
+.listing-fix-scan-history-row--active {
+  border-color: var(--p-color-border-success);
+  background: color-mix(
+    in oklab,
+    var(--p-color-bg-surface) 90%,
+    var(--p-color-bg-fill-success) 10%
+  );
+}
