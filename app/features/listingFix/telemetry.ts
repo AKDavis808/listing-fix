@@ -25,7 +25,13 @@ export type ListingFixTelemetryAction =
   | "oauth_start"
   | "oauth_complete"
   | "session_restored"
-  | "session_missing";
+  | "session_missing"
+  | "dashboard_mount"
+  | "dashboard_render"
+  | "dashboard_loader"
+  | "dashboard_render_error"
+  | "app_bridge_ready"
+  | "app_bridge_missing";
 
 export type ListingFixTelemetryEvent = {
   action: ListingFixTelemetryAction;
@@ -91,7 +97,9 @@ function isFailureAction(action: ListingFixTelemetryAction): boolean {
     action === "runtime_error" ||
     action === "catalog_load_failure" ||
     action === "usage_limit_hit" ||
-    action === "feedback_failed"
+    action === "feedback_failed" ||
+    action === "dashboard_render_error" ||
+    action === "app_bridge_missing"
   );
 }
 

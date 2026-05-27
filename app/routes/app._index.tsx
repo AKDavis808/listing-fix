@@ -10,7 +10,6 @@ import {
   useNavigation,
   useRevalidator,
 } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
@@ -33,6 +32,8 @@ import {
   Text,
 } from "@shopify/polaris";
 
+import { ListingFixDashboardDebugPanel } from "../components/listingFix/ListingFixDashboardDebugPanel";
+import { ListingFixDashboardErrorBoundary } from "../components/listingFix/ListingFixDashboardErrorBoundary";
 import { ListingFixDashboardMetricTile } from "../components/listingFix/ListingFixDashboardMetricTile";
 import { ListingFixBetaUsageCard } from "../components/listingFix/ListingFixBetaUsageCard";
 import { ListingFixBetaBadge } from "../components/listingFix/ListingFixBetaBadge";
@@ -87,6 +88,10 @@ import {
   REASSURANCE,
   AI_DISCLOSURE,
 } from "../features/listingFix/trustCopy";
+import {
+  showAppBridgeToast,
+  useSafeAppBridge,
+} from "../hooks/useSafeAppBridge";
 
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -312,7 +317,8 @@ export default function ListingFixHomePage() {
   const aiFetcher = useFetcher<AiSuggestionsActionData>();
   const applyFetcher = useFetcher<ApplyListingFieldActionData>();
 
-  const shopify = useAppBridge();
+  const appBridge = useSafeAppBridge(data.shop);
+  const bridgeReady = appBridge != null;
   const revalidator = useRevalidator();
   const navigation = useNavigation();
 
@@ -389,6 +395,54 @@ export default function ListingFixHomePage() {
   const fingerprint = data.ok ? data.products.map((p) => p.id).join("|") : "";
 
   const shopDomain = data.shop;
+  const productCount = data.ok ? data.products.length : 0;
+  const auditCount = Object.keys(auditByProductId).length;
+
+  useEffect(() => {
+    logListingFixEvent({
+      action: "dashboard_mount",
+      shop: shopDomain,
+      meta: {
+        loaderOk: data.ok,
+        productCount,
+        source: "client",
+      },
+    });
+  }, [shopDomain]);
+
+  useEffect(() => {
+    logListingFixEvent({
+      action: "dashboard_loader",
+      shop: shopDomain,
+      meta: {
+        loaderOk: data.ok,
+        productCount,
+        scanHistoryCount: data.scanHistory.length,
+        scansRemaining: data.usage.scansRemaining,
+        aiRemaining: data.usage.aiRemaining,
+      },
+    });
+  }, [
+    data.ok,
+    data.scanHistory.length,
+    data.usage.aiRemaining,
+    data.usage.scansRemaining,
+    productCount,
+    shopDomain,
+  ]);
+
+  useEffect(() => {
+    logListingFixEvent({
+      action: "dashboard_render",
+      shop: shopDomain,
+      meta: {
+        loaderOk: data.ok,
+        productCount,
+        auditCount,
+        bridgeReady,
+      },
+    });
+  }, [auditCount, bridgeReady, data.ok, productCount, shopDomain]);
 
   useEffect(() => {
     if (!data.ok || !fingerprint.length) {
@@ -452,9 +506,9 @@ export default function ListingFixHomePage() {
       meta: { productCount: Object.keys(next).length, source: "client" },
     });
     scanTimerRef.current = null;
-    shopify.toast.show("Listing scan complete");
+    showAppBridgeToast(appBridge, "Listing scan complete");
     void revalidator.revalidate();
-  }, [fetcher.state, fetcher.data, fingerprint, revalidator, shopDomain, shopify]);
+  }, [appBridge, fetcher.state, fetcher.data, fingerprint, revalidator, shopDomain]);
 
   const handleRestoreScan = useCallback(
     (sessionId: string) => {
@@ -478,7 +532,8 @@ export default function ListingFixHomePage() {
     setRestoringSessionId(null);
 
     if (!historyFetcher.data.ok) {
-      shopify.toast.show(
+      showAppBridgeToast(
+        appBridge,
         merchantFacingError(historyFetcher.data.error, "restore-scan"),
         { isError: true },
       );
@@ -494,14 +549,14 @@ export default function ListingFixHomePage() {
       payload.audits,
       normalizeDashboardFilter(payload.dashboardFilter),
     );
-    shopify.toast.show("Earlier scan results restored");
+    showAppBridgeToast(appBridge, "Earlier scan results restored");
     void revalidator.revalidate();
   }, [
+    appBridge,
     fingerprint,
     historyFetcher.data,
     historyFetcher.state,
     revalidator,
-    shopify,
   ]);
 
   useEffect(() => {
@@ -806,7 +861,7 @@ export default function ListingFixHomePage() {
     }
 
     if (response.ok) {
-      shopify.toast.show(formatApplyConfirmation(response.field));
+      showAppBridgeToast(appBridge, formatApplyConfirmation(response.field));
       setApplyOutcomeBanner({
         tone: "success",
         title: `${APPLY_FIELD_LABELS[response.field]} applied`,
@@ -818,7 +873,8 @@ export default function ListingFixHomePage() {
       const userErrText =
         response.userErrors?.map((entry) => entry.message).join(" ").trim() ??
         "";
-      shopify.toast.show(
+      showAppBridgeToast(
+        appBridge,
         merchantFacingError(response.errorMessage, "apply-listing-field"),
         { isError: true },
       );
@@ -834,12 +890,12 @@ export default function ListingFixHomePage() {
       });
     }
   }, [
+    appBridge,
     applyFetcher.data,
     applyFetcher.state,
     detailProductId,
     revalidator,
     shopDomain,
-    shopify,
     trackedApplyField,
   ]);
 
@@ -1146,7 +1202,63 @@ export default function ListingFixHomePage() {
     [activeScanSessionId, scanHistory],
   );
 
+  const dashboardDebugPanel = (
+    <ListingFixDashboardDebugPanel
+      loaderOk={data.ok}
+      productCount={productCount}
+      auditCount={auditCount}
+      bridgeReady={bridgeReady}
+      renderPhase={bridgeReady ? "dashboard" : "waiting_for_app_bridge"}
+    />
+  );
+
+  if (!bridgeReady) {
+    return (
+      <ListingFixDashboardErrorBoundary
+        shop={shopDomain}
+        loaderOk={data.ok}
+        productCount={productCount}
+        auditCount={auditCount}
+        bridgeReady={bridgeReady}
+      >
+        <Page
+          fullWidth
+          compactTitle
+          title="ListingFix"
+          titleMetadata={<ListingFixBetaBadge />}
+          subtitle="Loading your catalog dashboard…"
+        >
+          <Layout>
+            <Layout.Section>
+              <BlockStack gap="500">
+                <Card roundedAbove="sm" padding="500">
+                  <BlockStack gap="300">
+                    <InlineStack gap="200" blockAlign="center">
+                      <Spinner accessibilityLabel="Loading dashboard" size="small" />
+                      <Text as="p" variant="bodyMd" tone="subdued">
+                        Connecting to Shopify Admin…
+                      </Text>
+                    </InlineStack>
+                    <SkeletonBodyText lines={10} />
+                  </BlockStack>
+                </Card>
+                {dashboardDebugPanel}
+              </BlockStack>
+            </Layout.Section>
+          </Layout>
+        </Page>
+      </ListingFixDashboardErrorBoundary>
+    );
+  }
+
   return (
+    <ListingFixDashboardErrorBoundary
+      shop={shopDomain}
+      loaderOk={data.ok}
+      productCount={productCount}
+      auditCount={auditCount}
+      bridgeReady={bridgeReady}
+    >
     <Page
       fullWidth
       compactTitle
@@ -1496,6 +1608,7 @@ export default function ListingFixHomePage() {
                 </BlockStack>
               </>
             )}
+            {dashboardDebugPanel}
           </BlockStack>
         </Layout.Section>
       </Layout>
@@ -1859,6 +1972,7 @@ export default function ListingFixHomePage() {
         </Modal.Section>
       </Modal>
     </Page>
+    </ListingFixDashboardErrorBoundary>
   );
 }
 

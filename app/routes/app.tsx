@@ -35,10 +35,10 @@ export default function App() {
       <PolarisAppProvider i18n={translations}>
         <ListingFixEmbeddedBootstrap shop={shop} />
         <ListingFixTelemetryBootstrap shop={shop} />
+        <ListingFixAppNav />
         <ListingFixErrorBoundary shop={shop}>
           <ListingFixFeedbackProvider shop={shop}>
             <BlockStack gap="0">
-              <ListingFixAppNav />
               <Outlet />
               <ListingFixFeedbackFooter />
             </BlockStack>
@@ -59,6 +59,10 @@ function AppRouteErrorBoundary() {
       meta: { boundary: "app_route" },
     });
   }, [error]);
+
+  if (error instanceof Response) {
+    return boundary.error(error);
+  }
 
   if (typeof window !== "undefined") {
     const params = new URLSearchParams(window.location.search);
