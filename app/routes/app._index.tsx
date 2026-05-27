@@ -109,6 +109,15 @@ type StoredProductAudit = ProductAuditOutcome & {
   recommendations: IssueRecommendationPair[];
 };
 
+/** Safest string for Polaris `Text`/`Badge`/`label` children (avoids invalid React children). */
+function safeDisplayText(value: unknown, fallback = ""): string {
+  if (value == null) return fallback;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return fallback;
+}
+
 export const loader = async ({
   request,
 }: LoaderFunctionArgs): Promise<ListingFixHomeLoaderData> => {
@@ -276,6 +285,34 @@ export type DashboardCatalogFilter =
   | { mode: "lowest_score" }
   | { mode: "needs_attention" }
   | { mode: "top_issue"; issue: string };
+
+/** Coerce filter for render — invalid state becomes `none` (prevents pill/table crash). */
+function normalizeDashboardFilter(filter: DashboardCatalogFilter): DashboardCatalogFilter {
+  if (filter == null || typeof filter !== "object") {
+    return { mode: "none" };
+  }
+
+  switch (filter.mode) {
+    case "none":
+    case "scanned":
+    case "lowest_score":
+    case "needs_attention":
+      return { mode: filter.mode };
+    case "top_issue": {
+      const issue =
+        typeof filter.issue === "string" ? filter.issue.trim() : "";
+      if (
+        issue.length === 0 ||
+        issue === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL
+      ) {
+        return { mode: "none" };
+      }
+      return { mode: "top_issue", issue };
+    }
+    default:
+      return { mode: "none" };
+  }
+}
 
 function catalogFilterBadgeTone(
   filter: DashboardCatalogFilter,
@@ -500,6 +537,24 @@ export default function ListingFixHomePage() {
   const [dashboardFilter, setDashboardFilter] =
     useState<DashboardCatalogFilter>({ mode: "none" });
   const [detailProductId, setDetailProductId] = useState<string | null>(null);
+
+  const dashboardFilterForUi = useMemo(
+    () => normalizeDashboardFilter(dashboardFilter),
+    [dashboardFilter],
+  );
+
+  useEffect(() => {
+    const next = normalizeDashboardFilter(dashboardFilter);
+    const same =
+      dashboardFilter.mode === next.mode &&
+      (next.mode !== "top_issue" ||
+        (dashboardFilter.mode === "top_issue" &&
+          typeof dashboardFilter.issue === "string" &&
+          dashboardFilter.issue.trim() === next.issue));
+    if (!same) {
+      setDashboardFilter(next);
+    }
+  }, [dashboardFilter]);
 
   const fingerprint = data.ok ? data.products.map((p) => p.id).join("|") : "";
 
@@ -834,18 +889,23 @@ export default function ListingFixHomePage() {
       filterCatalogRowsByDashboard(
         orderedProducts,
         auditByProductId,
-        dashboardFilter,
+        dashboardFilterForUi,
       ),
-    [auditByProductId, dashboardFilter, orderedProducts],
+    [auditByProductId, dashboardFilterForUi, orderedProducts],
   );
 
   const tableRows = useMemo(() => {
     if (!data.ok || catalogProductsForTable.length === 0) return [];
 
-    return catalogProductsForTable.map((product) => {
-      const audit = auditByProductId[product.id];
+    return catalogProductsForTable.map((product, rowIndex) => {
+      const pid =
+        typeof product.id === "string" && product.id.length > 0
+          ? product.id
+          : "";
+      const rowKey = pid || `row-${rowIndex}`;
+      const audit = pid ? auditByProductId[pid] : undefined;
       const displayStatus = product.status
-        ? String(product.status).toLowerCase().replace(/_/g, " ")
+        ? safeDisplayText(product.status).toLowerCase().replace(/_/g, " ")
         : "unknown";
 
       const auditedScore =
@@ -872,14 +932,14 @@ export default function ListingFixHomePage() {
           </Text>
         );
 
-      const tt =
-        audit != null && typeof audit.topIssue === "string"
-          ? audit.topIssue.trim()
-          : "";
+      const topIssueRendered = safeDisplayText(
+        audit != null ? audit.topIssue : undefined,
+        "",
+      );
       const topIssueCell =
         audit != null ? (
-          tt.length > 0 ? (
-            audit.topIssue
+          topIssueRendered.trim().length > 0 ? (
+            topIssueRendered
           ) : (
             <Text as="span" variant="bodyMd" tone="subdued">
               —
@@ -891,14 +951,16 @@ export default function ListingFixHomePage() {
           </Text>
         );
 
+      const productTitle = safeDisplayText(product.title, "Untitled product");
+
       return [
-        <Text key={`t-${product.id}`} variant="bodyMd" as="span">
-          {product.title}
+        <Text key={`t-${rowKey}`} variant="bodyMd" as="span">
+          {productTitle}
         </Text>,
-        <span key={`sc-${product.id}`}>{scoreCell}</span>,
-        <span key={`ic-${product.id}`}>{issuesCell}</span>,
-        <span key={`ti-${product.id}`}>{topIssueCell}</span>,
-        <Badge key={`st-${product.id}`} tone={statusTone(product.status)}>
+        <span key={`sc-${rowKey}`}>{scoreCell}</span>,
+        <span key={`ic-${rowKey}`}>{issuesCell}</span>,
+        <span key={`ti-${rowKey}`}>{topIssueCell}</span>,
+        <Badge key={`st-${rowKey}`} tone={statusTone(product.status)}>
           {displayStatus}
         </Badge>,
         String(
@@ -907,12 +969,25 @@ export default function ListingFixHomePage() {
             : []
           ).filter((t) => typeof t === "string" && t.trim()).length,
         ),
-        String(product.variantsCount),
+        (() => {
+          const v = product.variantsCount;
+          if (typeof v === "number" && Number.isFinite(v)) {
+            return String(Math.max(0, Math.trunc(v)));
+          }
+          if (typeof v === "string" && v.trim() !== "") {
+            const n = Number.parseInt(v, 10);
+            return Number.isFinite(n) ? String(Math.max(0, n)) : "0";
+          }
+          return "0";
+        })(),
         <Button
-          key={`vd-${product.id}`}
+          key={`vd-${rowKey}`}
           variant="plain"
-          onClick={() => openProductDetails(product.id)}
-          accessibilityLabel={`View audit details for ${product.title}`}
+          disabled={!pid}
+          onClick={() => {
+            if (pid) openProductDetails(pid);
+          }}
+          accessibilityLabel={`View audit details for ${productTitle}`}
         >
           View Details
         </Button>,
@@ -946,18 +1021,18 @@ export default function ListingFixHomePage() {
     !topIssueLabel.length ||
     topIssueLabel === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL;
 
-  const dashboardFilterActive = dashboardFilter.mode !== "none";
+  const dashboardFilterActive = dashboardFilterForUi.mode !== "none";
 
   const lowestScoreSortingHint =
-    dashboardFilter.mode === "lowest_score"
+    dashboardFilterForUi.mode === "lowest_score"
       ? "Showing all catalog products sorted with lowest audit scores first — unscanned products stay at the end."
       : null;
 
-  const activeFilterTone = catalogFilterBadgeTone(dashboardFilter);
+  const activeFilterTone = catalogFilterBadgeTone(dashboardFilterForUi);
   const activeFilterLabel =
-    dashboardFilter.mode === "none"
+    dashboardFilterForUi.mode === "none"
       ? ""
-      : dashboardFilterBadgeLabel(dashboardFilter);
+      : catalogFilterBadgeLabel(dashboardFilterForUi);
   return (
     <Page
       fullWidth
@@ -1018,7 +1093,7 @@ export default function ListingFixHomePage() {
                     <DashboardInteractiveMetricTile
                       accessibilityHint="Toggle to show audited products only. Press again or use Clear filter to reset."
                       label="Products scanned"
-                      selected={dashboardFilter.mode === "scanned"}
+                      selected={dashboardFilterForUi.mode === "scanned"}
                       disabled={scannedMetricDisabled}
                       onToggle={() =>
                         toggleDashboardCatalogSlice("scanned_products")
@@ -1032,7 +1107,7 @@ export default function ListingFixHomePage() {
                     <DashboardInteractiveMetricTile
                       accessibilityHint="Toggle to sort the catalog with the lowest audited scores first. Toggle again or clear to revert."
                       label="Average score"
-                      selected={dashboardFilter.mode === "lowest_score"}
+                      selected={dashboardFilterForUi.mode === "lowest_score"}
                       disabled={averageMetricDisabled}
                       onToggle={() =>
                         toggleDashboardCatalogSlice("average_scores")
@@ -1052,7 +1127,7 @@ export default function ListingFixHomePage() {
                     <DashboardInteractiveMetricTile
                       accessibilityHint="Toggle to show scanned products scoring below 80 points."
                       label="Needs attention (score below 80)"
-                      selected={dashboardFilter.mode === "needs_attention"}
+                      selected={dashboardFilterForUi.mode === "needs_attention"}
                       disabled={needsAttentionMetricDisabled}
                       onToggle={() =>
                         toggleDashboardCatalogSlice("needs_attention")
@@ -1067,9 +1142,9 @@ export default function ListingFixHomePage() {
                       accessibilityHint={`Toggle to isolate products flagged with "${topIssueLabel || "common issues"}".`}
                       label="Most common issue"
                       selected={
-                        dashboardFilter.mode === "top_issue" &&
-                        typeof dashboardFilter.issue === "string" &&
-                        dashboardFilter.issue.trim() === topIssueLabel
+                        dashboardFilterForUi.mode === "top_issue" &&
+                        typeof dashboardFilterForUi.issue === "string" &&
+                        dashboardFilterForUi.issue.trim() === topIssueLabel
                       }
                       disabled={commonIssueMetricDisabled}
                       onToggle={() =>
@@ -1085,7 +1160,10 @@ export default function ListingFixHomePage() {
                         breakWord
                         fontWeight="semibold"
                       >
-                        {dashboardStats.topIssue}
+                        {safeDisplayText(
+                          dashboardStats.topIssue,
+                          DASHBOARD_AGGREGATE_NO_ISSUE_LABEL,
+                        )}
                       </Text>
                     </DashboardInteractiveMetricTile>
                   </InlineGrid>
@@ -1198,7 +1276,7 @@ export default function ListingFixHomePage() {
                   Product title
                 </Text>
                 <Text as="h2" variant="headingLg">
-                  {detailProduct.title}
+                  {safeDisplayText(detailProduct.title, "Untitled product")}
                 </Text>
                 <InlineScoreRow audit={detailAudit} />
               </BlockStack>
@@ -1211,8 +1289,10 @@ export default function ListingFixHomePage() {
                 </Text>
                 {safeIssuesList(detailAudit).length ? (
                   <List type="bullet" gap="loose">
-                    {safeIssuesList(detailAudit).map((issue) => (
-                      <List.Item key={issue}>{issue}</List.Item>
+                    {safeIssuesList(detailAudit).map((issue, idx) => (
+                      <List.Item key={`${detailProduct.id}-issue-${idx}`}>
+                        {safeDisplayText(issue, "—")}
+                      </List.Item>
                     ))}
                   </List>
                 ) : (
@@ -1231,18 +1311,25 @@ export default function ListingFixHomePage() {
                 {Array.isArray(detailAudit.recommendations) &&
                 detailAudit.recommendations.length ? (
                   <BlockStack gap="300">
-                    {detailAudit.recommendations.map(({ issue, recommendation }) => (
-                      <Card key={`${detailProduct.id}-${issue}`}>
+                    {detailAudit.recommendations.map((rec, recIdx) => {
+                      const issueLine = safeDisplayText(rec?.issue, "Issue");
+                      const recLine = safeDisplayText(
+                        rec?.recommendation,
+                        "",
+                      );
+                      return (
+                      <Card key={`${detailProduct.id}-rec-${recIdx}`}>
                         <BlockStack gap="150">
                           <Text as="h4" variant="headingSm">
-                            {issue}
+                            {issueLine}
                           </Text>
                           <Text as="p" variant="bodyMd">
-                            {recommendation}
+                            {recLine}
                           </Text>
                         </BlockStack>
                       </Card>
-                    ))}
+                      );
+                    })}
                   </BlockStack>
                 ) : (
                   <Text as="p" variant="bodyMd" tone="subdued">
