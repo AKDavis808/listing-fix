@@ -62,3 +62,16 @@ body {
     transparent
   );
 }
+
+.listing-fix-overview-metric--busy {
+  opacity: 0.72;
+}
+
+.listing-fix-catalog-panel {
+  transition: opacity 0.2s ease;
+}
+
+.listing-fix-catalog-panel--dim {
+  opacity: 0.55;
+  pointer-events: none;
+}

@@ -4,7 +4,12 @@ import type {
   LoaderFunctionArgs,
 } from "react-router";
 import type { ReactNode } from "react";
-import { useFetcher, useLoaderData, useRevalidator } from "react-router";
+import {
+  useFetcher,
+  useLoaderData,
+  useNavigation,
+  useRevalidator,
+} from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -23,16 +28,40 @@ import {
   List,
   Modal,
   Page,
+  SkeletonBodyText,
   Spinner,
   Text,
 } from "@shopify/polaris";
-import type { BadgeProps } from "@shopify/polaris";
+
+import { ListingFixDashboardMetricTile } from "../components/listingFix/ListingFixDashboardMetricTile";
+import type { AuditedCatalogProductRow } from "../features/listingFix/dashboardHelpers";
+import {
+  DASHBOARD_AGGREGATE_NO_ISSUE_LABEL,
+  catalogFilterBadgeLabel,
+  catalogFilterBadgeTone,
+  coerceStoredAuditFromRow,
+  computeDashboardStats,
+  filterCatalogRowsByDashboard,
+  merchantFacingError,
+  normalizeDashboardFilter,
+  safeAuditScore,
+  safeDisplayText,
+  safeIssuesList,
+  scoreTone,
+  sortProductsForTable,
+  statusTone,
+  type DashboardCatalogFilter,
+  type StoredProductAudit,
+} from "../features/listingFix/dashboardHelpers";
+import {
+  loadPersistedDashboard,
+  persistDashboardSnapshot,
+} from "../features/listingFix/scanPersist";
 
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   auditProduct,
-  type ProductAuditOutcome,
 } from "../services/productAudit.server";
 import {
   fetchCatalogProducts,
@@ -74,11 +103,6 @@ function formatApplyConfirmation(field: ApplyListingFieldKind): string {
 }
 
 /** Row returned after `/app` scan POST (audit + recommendations, in-memory only). */
-type AuditedCatalogProductRow = ClientCatalogProductRow &
-  ProductAuditOutcome & {
-    recommendations: IssueRecommendationPair[];
-  };
-
 type LoaderFailure = {
   ok: false;
   errorMessage: string;
@@ -105,18 +129,7 @@ export type ListingFixAuditActionData =
   | AuditActionSuccess
   | null;
 
-type StoredProductAudit = ProductAuditOutcome & {
-  recommendations: IssueRecommendationPair[];
-};
-
-/** Safest string for Polaris `Text`/`Badge`/`label` children (avoids invalid React children). */
-function safeDisplayText(value: unknown, fallback = ""): string {
-  if (value == null) return fallback;
-  if (typeof value === "string") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  return fallback;
-}
+export type { DashboardCatalogFilter } from "../features/listingFix/dashboardHelpers";
 
 export const loader = async ({
   request,
@@ -169,327 +182,6 @@ export const action = async ({
   return { ok: true, audited };
 };
 
-/** Safe Polaris tone for product status badges (handles missing/non-string GraphQL payloads). */
-function statusTone(status: string | null | undefined): BadgeProps["tone"] | undefined {
-  const normalized = String(status ?? "")
-    .toUpperCase()
-    .replace(/\s+/g, "_")
-    .replace(/\./g, "_");
-  switch (normalized) {
-    case "ACTIVE":
-      return "success";
-    case "DRAFT":
-      return "attention";
-    case "ARCHIVED":
-      return undefined;
-    default:
-      return "info";
-  }
-}
-
-function scoreTone(score: number): Exclude<BadgeProps["tone"], undefined> {
-  if (score >= 80) return "success";
-  if (score >= 50) return "warning";
-  return "critical";
-}
-
-/** In-memory sort: scanned rows first (worst score first); unscanned preserves catalog order. */
-/** Safe numeric audit score for sorting/filtering when state is incomplete. */
-function safeAuditScore(audit: StoredProductAudit | undefined | null): number {
-  if (
-    audit == null ||
-    typeof audit.score !== "number" ||
-    !Number.isFinite(audit.score)
-  ) {
-    return 0;
-  }
-  return audit.score;
-}
-
-function coerceStoredAuditFromRow(row: AuditedCatalogProductRow): StoredProductAudit {
-  const issues = Array.isArray(row.issues)
-    ? row.issues.filter((i): i is string => typeof i === "string")
-    : [];
-  const recommendations = Array.isArray(row.recommendations)
-    ? row.recommendations.filter(
-        (r): r is IssueRecommendationPair =>
-          r != null &&
-          typeof r === "object" &&
-          typeof (r as IssueRecommendationPair).issue === "string" &&
-          typeof (r as IssueRecommendationPair).recommendation === "string",
-      )
-    : [];
-
-  let score =
-    typeof row.score === "number" && Number.isFinite(row.score)
-      ? row.score
-      : 0;
-
-  score = Math.max(0, Math.min(100, score));
-
-  const topIssue =
-    typeof row.topIssue === "string" ? row.topIssue.trim() : "";
-
-  return {
-    score,
-    issues,
-    topIssue,
-    recommendations,
-  };
-}
-
-/** Issue list stored on audits (arrays only; tolerant of malformed responses). */
-function safeIssuesList(audit: StoredProductAudit | undefined | null): string[] {
-  return Array.isArray(audit?.issues)
-    ? audit.issues.filter((i): i is string => typeof i === "string")
-    : [];
-}
-
-function sortProductsForTable(
-  products: ClientCatalogProductRow[],
-  auditMap: Record<string, StoredProductAudit>,
-): ClientCatalogProductRow[] {
-  if (!products.length) return [];
-
-  const copy = [...products];
-  copy.sort((a, b) => {
-    const au = auditMap[a.id];
-    const bu = auditMap[b.id];
-    const aDone = au != null;
-    const bDone = bu != null;
-    if (aDone !== bDone) {
-      return aDone ? -1 : 1;
-    }
-    if (aDone && bDone && au && bu) {
-      const as = safeAuditScore(au);
-      const bs = safeAuditScore(bu);
-      if (as !== bs) {
-        return as - bs;
-      }
-      const ta = typeof a.title === "string" ? a.title : "";
-      const tb = typeof b.title === "string" ? b.title : "";
-      if (ta !== tb) {
-        return ta.localeCompare(tb);
-      }
-    }
-    return products.indexOf(a) - products.indexOf(b);
-  });
-  return copy;
-}
-
-const DASHBOARD_AGGREGATE_NO_ISSUE_LABEL = "No issues detected";
-
-export type DashboardCatalogFilter =
-  | { mode: "none" }
-  | { mode: "scanned" }
-  | { mode: "lowest_score" }
-  | { mode: "needs_attention" }
-  | { mode: "top_issue"; issue: string };
-
-/** Coerce filter for render — invalid state becomes `none` (prevents pill/table crash). */
-function normalizeDashboardFilter(filter: DashboardCatalogFilter): DashboardCatalogFilter {
-  if (filter == null || typeof filter !== "object") {
-    return { mode: "none" };
-  }
-
-  switch (filter.mode) {
-    case "none":
-    case "scanned":
-    case "lowest_score":
-    case "needs_attention":
-      return { mode: filter.mode };
-    case "top_issue": {
-      const issue =
-        typeof filter.issue === "string" ? filter.issue.trim() : "";
-      if (
-        issue.length === 0 ||
-        issue === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL
-      ) {
-        return { mode: "none" };
-      }
-      return { mode: "top_issue", issue };
-    }
-    default:
-      return { mode: "none" };
-  }
-}
-
-function catalogFilterBadgeTone(
-  filter: DashboardCatalogFilter,
-): NonNullable<BadgeProps["tone"]> {
-  switch (filter.mode) {
-    case "top_issue":
-      return "attention";
-    case "needs_attention":
-      return "warning";
-    case "scanned":
-    case "lowest_score":
-      return "info";
-    default:
-      return "info";
-  }
-}
-
-function catalogFilterBadgeLabel(filter: DashboardCatalogFilter): string {
-  if (filter.mode === "none") {
-    return "";
-  }
-
-  switch (filter.mode) {
-    case "scanned":
-      return "Products scanned";
-    case "lowest_score":
-      return "Lowest scores first";
-    case "needs_attention":
-      return "Needs attention (<80)";
-    case "top_issue": {
-      const issueText =
-        typeof filter.issue === "string" ? filter.issue.trim() : "";
-      if (!issueText.length) return "Most common issue";
-      const short =
-        issueText.length > 64
-          ? `${issueText.slice(0, 63)}…`
-          : issueText;
-      return short;
-    }
-    default:
-      filter satisfies never;
-      return "";
-  }
-}
-
-/** Rows for the catalog table preserving `orderedProducts` order within the slice. */
-function filterCatalogRowsByDashboard(
-  orderedProducts: ClientCatalogProductRow[],
-  audits: Record<string, StoredProductAudit>,
-  filter: DashboardCatalogFilter,
-): ClientCatalogProductRow[] {
-  if (filter.mode === "none" || filter.mode === "lowest_score") {
-    return orderedProducts;
-  }
-
-  const matchProduct = (p: ClientCatalogProductRow): boolean => {
-    const a = audits[p.id];
-    switch (filter.mode) {
-      case "scanned":
-        return a != null;
-      case "needs_attention": {
-        if (a == null) return false;
-        const s = safeAuditScore(a);
-        return s < 80;
-      }
-      case "top_issue": {
-        if (a == null) return false;
-        const target =
-          typeof filter.issue === "string" ? filter.issue.trim() : "";
-        if (!target.length) return false;
-        return safeIssuesList(a).some(
-          (issue) => issue.trim() === target,
-        );
-      }
-      default:
-        return true;
-    }
-  };
-
-  return orderedProducts.filter(matchProduct);
-}
-
-function DashboardInteractiveMetricTile({
-  accessibilityHint,
-  label,
-  selected,
-  disabled,
-  onToggle,
-  children,
-}: {
-  accessibilityHint: string;
-  label: string;
-  selected: boolean;
-  disabled?: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      className="listing-fix-overview-metric"
-      aria-pressed={selected}
-      aria-disabled={disabled ?? false}
-      aria-label={accessibilityHint}
-      disabled={disabled}
-      onClick={onToggle}
-    >
-      <div className="listing-fix-overview-metric-inner">
-        <Card padding="400" roundedAbove="sm">
-          <BlockStack gap="150">
-            <Box minHeight="1.75rem">{children}</Box>
-            <Text variant="bodySm" tone="subdued" as="p">
-              {label}
-            </Text>
-          </BlockStack>
-        </Card>
-      </div>
-    </button>
-  );
-}
-
-function computeDashboardStats(
-  products: ClientCatalogProductRow[],
-  auditMap: Record<string, StoredProductAudit>,
-): {
-  scannedCount: number;
-  avgScore: number | null;
-  needsAttention: number;
-  topIssue: string;
-} {
-  const audited = products.filter((p) => auditMap[p.id] != null);
-  const n = audited.length;
-
-  if (n === 0) {
-    return {
-      scannedCount: 0,
-      avgScore: null,
-      needsAttention: 0,
-      topIssue: DASHBOARD_AGGREGATE_NO_ISSUE_LABEL,
-    };
-  }
-
-  let sumScores = 0;
-  let needsAttention = 0;
-  const issueFreq = new Map<string, number>();
-
-  for (const p of audited) {
-    const a = auditMap[p.id];
-    if (a == null) continue;
-    const score = safeAuditScore(a);
-    sumScores += score;
-    if (score < 80) {
-      needsAttention += 1;
-    }
-    for (const issue of safeIssuesList(a)) {
-      const key = issue.trim();
-      if (!key.length) continue;
-      issueFreq.set(key, (issueFreq.get(key) ?? 0) + 1);
-    }
-  }
-
-  let topIssue = DASHBOARD_AGGREGATE_NO_ISSUE_LABEL;
-  if (issueFreq.size > 0) {
-    const sorted = [...issueFreq.entries()].sort(
-      (x, y) => y[1] - x[1] || x[0].localeCompare(y[0]),
-    );
-    topIssue = sorted[0]?.[0] ?? DASHBOARD_AGGREGATE_NO_ISSUE_LABEL;
-  }
-
-  return {
-    scannedCount: n,
-    avgScore: Math.round(sumScores / n),
-    needsAttention,
-    topIssue,
-  };
-}
-
 const EMPTY_CATALOG_IMG =
   "https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png";
 
@@ -501,6 +193,7 @@ export default function ListingFixHomePage() {
 
   const shopify = useAppBridge();
   const revalidator = useRevalidator();
+  const navigation = useNavigation();
 
   const [trackedApplyField, setTrackedApplyField] =
     useState<ApplyListingFieldKind | null>(null);
@@ -517,6 +210,7 @@ export default function ListingFixHomePage() {
 
   const applySeqCounterRef = useRef(0);
   const expectedListingApplyTokenRef = useRef<string | null>(null);
+  const lastScanResultRef = useRef<ListingFixAuditActionData>(null);
 
   /** Scroll/highlight: anchored modal region + transient pulse + ledger per catalog product ID. */
   const aiResultsAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -537,6 +231,9 @@ export default function ListingFixHomePage() {
   const [dashboardFilter, setDashboardFilter] =
     useState<DashboardCatalogFilter>({ mode: "none" });
   const [detailProductId, setDetailProductId] = useState<string | null>(null);
+
+  const dashboardFilterRef = useRef(dashboardFilter);
+  dashboardFilterRef.current = dashboardFilter;
 
   const dashboardFilterForUi = useMemo(
     () => normalizeDashboardFilter(dashboardFilter),
@@ -559,13 +256,43 @@ export default function ListingFixHomePage() {
   const fingerprint = data.ok ? data.products.map((p) => p.id).join("|") : "";
 
   useEffect(() => {
+    if (!data.ok || !fingerprint.length) {
+      setAuditByProductId({});
+      setDashboardFilter({ mode: "none" });
+      return;
+    }
+
+    const productIds = data.products
+      .map((p) => p.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+
+    const saved = loadPersistedDashboard(fingerprint, productIds);
+    if (saved) {
+      setAuditByProductId(saved.audits);
+      setDashboardFilter(saved.filter);
+      return;
+    }
+
     setAuditByProductId({});
     setDashboardFilter({ mode: "none" });
-  }, [fingerprint]);
+  }, [data.ok, fingerprint]);
+
+  useEffect(() => {
+    if (!fingerprint.length || Object.keys(auditByProductId).length === 0) {
+      return;
+    }
+    persistDashboardSnapshot(
+      fingerprint,
+      auditByProductId,
+      dashboardFilterForUi,
+    );
+  }, [auditByProductId, dashboardFilterForUi, fingerprint]);
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
     if (!fetcher.data.ok) return;
+    if (lastScanResultRef.current === fetcher.data) return;
+    lastScanResultRef.current = fetcher.data;
 
     const next: Record<string, StoredProductAudit> = {};
     for (const row of fetcher.data.audited) {
@@ -573,9 +300,16 @@ export default function ListingFixHomePage() {
       next[row.id] = coerceStoredAuditFromRow(row);
     }
     setAuditByProductId(next);
-  }, [fetcher.state, fetcher.data]);
+    persistDashboardSnapshot(
+      fingerprint,
+      next,
+      normalizeDashboardFilter(dashboardFilterRef.current),
+    );
+    shopify.toast.show("Listing scan complete");
+  }, [fetcher.state, fetcher.data, fingerprint, shopify]);
 
   const handleScanProducts = useCallback(() => {
+    if (fetcher.state !== "idle") return;
     const form = new FormData();
     form.set("intent", "audit");
     fetcher.submit(form, { method: "post" });
@@ -589,8 +323,12 @@ export default function ListingFixHomePage() {
 
   const scanError =
     fetcher.state === "idle" && fetcher.data && !fetcher.data.ok
-      ? fetcher.data.errorMessage
+      ? merchantFacingError(fetcher.data.errorMessage, "scan-products")
       : null;
+
+  const catalogLoadError = !data.ok
+    ? merchantFacingError(data.errorMessage, "load-catalog")
+    : null;
 
   const detailProduct =
     detailProductId != null && data.ok
@@ -616,10 +354,15 @@ export default function ListingFixHomePage() {
       aiIdleData.productId === detailProductId);
 
   const aiSuggestions = aiSuccess ? aiIdleData.suggestions : null;
-  const aiErrorMessage = aiFailure ? aiIdleData.error : null;
+  const aiErrorMessage = aiFailure
+    ? merchantFacingError(aiIdleData?.error, "ai-suggestions")
+    : null;
+
+  const applyInFlight = applyFetcher.state !== "idle";
 
   const handleGenerateAiSuggestions = useCallback(() => {
     if (!detailProductId || !detailAudit) return;
+    if (aiFetcher.state !== "idle" || applyFetcher.state !== "idle") return;
 
     setHighlightFreshAiSuggestions(false);
     if (aiHighlightDismissTimerRef.current != null) {
@@ -749,14 +492,19 @@ export default function ListingFixHomePage() {
       const userErrText =
         response.userErrors?.map((entry) => entry.message).join(" ").trim() ??
         "";
-      const detail = userErrText
-        ? `${response.errorMessage} ${userErrText}`
-        : response.errorMessage;
-      shopify.toast.show(response.errorMessage, { isError: true });
+      shopify.toast.show(
+        merchantFacingError(response.errorMessage, "apply-listing-field"),
+        { isError: true },
+      );
       setApplyOutcomeBanner({
         tone: "critical",
         title: `${APPLY_FIELD_LABELS[response.field]} not saved`,
-        detail,
+        detail: merchantFacingError(
+          userErrText
+            ? `${response.errorMessage} ${userErrText}`
+            : response.errorMessage,
+          "apply-listing-field",
+        ),
       });
     }
   }, [
@@ -770,7 +518,7 @@ export default function ListingFixHomePage() {
 
   const beginListingFieldApply = useCallback(
     (field: ApplyListingFieldKind, buildPayload: () => FormData | null) => {
-      if (!detailProductId) return;
+      if (!detailProductId || applyFetcher.state !== "idle") return;
       const form = buildPayload();
       if (!form) return;
 
@@ -1001,7 +749,13 @@ export default function ListingFixHomePage() {
     [applyFetcher.state, trackedApplyField],
   );
 
-  const scanning = fetcher.state === "submitting";
+  const scanning = fetcher.state !== "idle";
+  const catalogRefreshing = revalidator.state === "loading";
+  const catalogNavigating =
+    navigation.state === "loading" && navigation.location != null;
+  const catalogBusy = catalogRefreshing || catalogNavigating;
+  const hasScannedSession = dashboardStats.scannedCount > 0;
+  const overviewBusy = scanning || catalogBusy;
 
   const scannedMetricDisabled =
     !data.ok || dashboardStats.scannedCount === 0;
@@ -1043,19 +797,19 @@ export default function ListingFixHomePage() {
         content: "Scan Products",
         onAction: handleScanProducts,
         loading: scanning,
-        disabled: !data.ok || data.products.length === 0,
+        disabled: !data.ok || data.products.length === 0 || scanning || catalogBusy,
       }}
     >
       <Layout>
         <Layout.Section>
           <BlockStack gap="500">
-            {!data.ok && (
+            {!data.ok && catalogLoadError ? (
               <Banner tone="critical" title="Couldn't load products">
                 <Text as="p" variant="bodyMd">
-                  {data.errorMessage}
+                  {catalogLoadError}
                 </Text>
               </Banner>
-            )}
+            ) : null}
 
             {scanError ? (
               <Banner tone="critical" title="Scan failed">
@@ -1090,11 +844,12 @@ export default function ListingFixHomePage() {
                     gap="400"
                     alignItems="stretch"
                   >
-                    <DashboardInteractiveMetricTile
+                    <ListingFixDashboardMetricTile
                       accessibilityHint="Toggle to show audited products only. Press again or use Clear filter to reset."
                       label="Products scanned"
                       selected={dashboardFilterForUi.mode === "scanned"}
                       disabled={scannedMetricDisabled}
+                      busy={overviewBusy}
                       onToggle={() =>
                         toggleDashboardCatalogSlice("scanned_products")
                       }
@@ -1102,13 +857,14 @@ export default function ListingFixHomePage() {
                       <Text variant="heading2xl" as="p" numeric>
                         {dashboardStats.scannedCount}
                       </Text>
-                    </DashboardInteractiveMetricTile>
+                    </ListingFixDashboardMetricTile>
 
-                    <DashboardInteractiveMetricTile
+                    <ListingFixDashboardMetricTile
                       accessibilityHint="Toggle to sort the catalog with the lowest audited scores first. Toggle again or clear to revert."
                       label="Average score"
                       selected={dashboardFilterForUi.mode === "lowest_score"}
                       disabled={averageMetricDisabled}
+                      busy={overviewBusy}
                       onToggle={() =>
                         toggleDashboardCatalogSlice("average_scores")
                       }
@@ -1122,13 +878,14 @@ export default function ListingFixHomePage() {
                           {dashboardStats.avgScore}
                         </Text>
                       )}
-                    </DashboardInteractiveMetricTile>
+                    </ListingFixDashboardMetricTile>
 
-                    <DashboardInteractiveMetricTile
+                    <ListingFixDashboardMetricTile
                       accessibilityHint="Toggle to show scanned products scoring below 80 points."
                       label="Needs attention (score below 80)"
                       selected={dashboardFilterForUi.mode === "needs_attention"}
                       disabled={needsAttentionMetricDisabled}
+                      busy={overviewBusy}
                       onToggle={() =>
                         toggleDashboardCatalogSlice("needs_attention")
                       }
@@ -1136,9 +893,9 @@ export default function ListingFixHomePage() {
                       <Text variant="heading2xl" as="p" numeric>
                         {dashboardStats.needsAttention}
                       </Text>
-                    </DashboardInteractiveMetricTile>
+                    </ListingFixDashboardMetricTile>
 
-                    <DashboardInteractiveMetricTile
+                    <ListingFixDashboardMetricTile
                       accessibilityHint={`Toggle to isolate products flagged with "${topIssueLabel || "common issues"}".`}
                       label="Most common issue"
                       selected={
@@ -1147,6 +904,7 @@ export default function ListingFixHomePage() {
                         dashboardFilterForUi.issue.trim() === topIssueLabel
                       }
                       disabled={commonIssueMetricDisabled}
+                      busy={overviewBusy}
                       onToggle={() =>
                         toggleDashboardCatalogSlice(
                           "most_common_issue",
@@ -1165,13 +923,44 @@ export default function ListingFixHomePage() {
                           DASHBOARD_AGGREGATE_NO_ISSUE_LABEL,
                         )}
                       </Text>
-                    </DashboardInteractiveMetricTile>
+                    </ListingFixDashboardMetricTile>
                   </InlineGrid>
                 </BlockStack>
 
+                {!hasScannedSession && !scanning ? (
+                  <Banner tone="info" title="Ready when you are">
+                    <Text as="p" variant="bodyMd">
+                      Select <strong>Scan Products</strong> to score your first 25
+                      listings. Results stay available while this admin tab is open.
+                    </Text>
+                  </Banner>
+                ) : null}
+
+                {scanning ? (
+                  <Banner tone="info" title="Scanning products">
+                    <InlineStack gap="200" blockAlign="center" wrap>
+                      <Spinner
+                        accessibilityLabel="Scanning catalog products"
+                        size="small"
+                      />
+                      <Text as="p" variant="bodyMd">
+                        Checking listing quality — this usually takes a few seconds.
+                      </Text>
+                    </InlineStack>
+                  </Banner>
+                ) : null}
+
+                {catalogBusy && !scanning ? (
+                  <Banner tone="info" title="Refreshing catalog">
+                    <Text as="p" variant="bodyMd">
+                      Syncing the latest product data from Shopify…
+                    </Text>
+                  </Banner>
+                ) : null}
+
                 <Divider />
 
-                <BlockStack gap="200">
+                <BlockStack gap="200" className="listing-fix-catalog-panel">
                   <Text as="h2" variant="headingSm">
                     Catalog audit
                   </Text>
@@ -1198,23 +987,55 @@ export default function ListingFixHomePage() {
                     </Text>
                   ) : null}
 
-                  <Card roundedAbove="sm" padding="0">
-                    {catalogProductsForTable.length === 0 ? (
+                  <Card
+                    roundedAbove="sm"
+                    padding="0"
+                    className={
+                      scanning ? "listing-fix-catalog-panel--dim" : undefined
+                    }
+                  >
+                    {catalogBusy && catalogProductsForTable.length > 0 ? (
+                      <Box padding="600">
+                        <BlockStack gap="300">
+                          <SkeletonBodyText lines={1} />
+                          <SkeletonBodyText lines={8} />
+                        </BlockStack>
+                      </Box>
+                    ) : catalogProductsForTable.length === 0 ? (
                       <Box padding="600">
                         <EmptyState
-                          heading="Nothing matches right now"
+                          heading={
+                            dashboardFilterActive
+                              ? "No products match this focus"
+                              : hasScannedSession
+                                ? "Nothing to show"
+                                : "No scan results yet"
+                          }
                           fullWidth={false}
                         >
                           <BlockStack gap="200">
                             <Text as="p" variant="bodyMd" alignment="center">
                               {dashboardFilterActive
-                                ? "Try widening your Overview focus — or scan more products."
-                                : "There are no products to show yet."}
+                                ? "Try clearing the Overview focus or choose a different metric card."
+                                : hasScannedSession
+                                  ? "Your catalog list is empty — add products in Shopify Admin, then reload."
+                                  : "Run Scan Products to populate scores, issues, and recommendations for this catalog."}
                             </Text>
                             {dashboardFilterActive ? (
                               <InlineStack gap="300" justify="center">
                                 <Button onClick={clearDashboardCatalogFilter}>
                                   Clear Overview focus
+                                </Button>
+                              </InlineStack>
+                            ) : !hasScannedSession ? (
+                              <InlineStack gap="300" justify="center">
+                                <Button
+                                  variant="primary"
+                                  loading={scanning}
+                                  disabled={scanning || catalogBusy}
+                                  onClick={handleScanProducts}
+                                >
+                                  Scan Products
                                 </Button>
                               </InlineStack>
                             ) : null}
@@ -1357,7 +1178,11 @@ export default function ListingFixHomePage() {
                   <Button
                     variant="primary"
                     loading={aiGenerating}
-                    disabled={aiGenerating || !detailProduct}
+                    disabled={
+                      aiGenerating ||
+                      applyInFlight ||
+                      !detailProduct
+                    }
                     onClick={handleGenerateAiSuggestions}
                   >
                     Generate AI Fixes
@@ -1400,6 +1225,16 @@ export default function ListingFixHomePage() {
                   </InlineStack>
                 ) : null}
 
+                {!aiErrorMessage && !aiGenerating && !aiSuggestions ? (
+                  <Banner tone="info" title="Generate tailored copy">
+                    <Text as="p" variant="bodyMd">
+                      Click <strong>Generate AI Fixes</strong> to draft title,
+                      description, tags, and SEO ideas based on this product&apos;s
+                      audit. Review everything before applying to Shopify.
+                    </Text>
+                  </Banner>
+                ) : null}
+
                 {aiSuggestions ? (
                   <div
                     ref={aiResultsAnchorRef}
@@ -1433,7 +1268,7 @@ export default function ListingFixHomePage() {
                       applySuccessPulse={applySuccessBadgeField === "title"}
                       disableApply={
                         aiSuggestions.improvedTitle.trim().length === 0 ||
-                        applyFetcher.state !== "idle"
+                        applyInFlight
                       }
                       onApplyToShopify={() =>
                         beginListingFieldApply("title", () => {
@@ -1452,7 +1287,7 @@ export default function ListingFixHomePage() {
                       applySuccessPulse={applySuccessBadgeField === "description"}
                       disableApply={
                         aiSuggestions.improvedDescription.trim().length === 0 ||
-                        applyFetcher.state !== "idle"
+                        applyInFlight
                       }
                       onApplyToShopify={() =>
                         beginListingFieldApply("description", () => {
@@ -1478,7 +1313,7 @@ export default function ListingFixHomePage() {
                       applySuccessPulse={applySuccessBadgeField === "seo"}
                       disableApply={
                         aiSuggestions.seoDescription.trim().length === 0 ||
-                        applyFetcher.state !== "idle"
+                        applyInFlight
                       }
                       onApplyToShopify={() =>
                         beginListingFieldApply("seo", () => {
@@ -1518,7 +1353,7 @@ export default function ListingFixHomePage() {
                             loading={isListingFieldApplyBusy("tags")}
                             disabled={
                               aiSuggestions.suggestedTags.length === 0 ||
-                              applyFetcher.state !== "idle"
+                              applyInFlight
                             }
                             onClick={() =>
                               beginListingFieldApply("tags", () => {
