@@ -29,3 +29,17 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+model ShopUsageDaily {
+  id                String   @id @default(cuid())
+  shop              String
+  usageDate         DateTime @db.Date
+  scanCount         Int      @default(0)
+  aiGenerationCount Int      @default(0)
+  applyCount        Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([shop, usageDate])
+  @@index([shop])
+}

@@ -5,6 +5,7 @@ import {
   logListingFixEvent,
   startTimer,
 } from "../features/listingFix/telemetry";
+import { incrementApplyUsage } from "../features/listingFix/usage.server";
 import { authenticate } from "../shopify.server";
 import {
   assertProductGid,
@@ -138,6 +139,9 @@ export const action = async ({
     outcome: ProductFieldUpdateResult,
   ): ApplyListingFieldActionData {
     if (outcome.ok) {
+      void incrementApplyUsage(shop).catch(() => {
+        // Usage tracking must not block successful Shopify updates.
+      });
       logListingFixEvent({
         action: "apply_success",
         shop,

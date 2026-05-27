@@ -34,6 +34,7 @@ import {
 } from "@shopify/polaris";
 
 import { ListingFixDashboardMetricTile } from "../components/listingFix/ListingFixDashboardMetricTile";
+import { ListingFixBetaUsageCard } from "../components/listingFix/ListingFixBetaUsageCard";
 import type { AuditedCatalogProductRow } from "../features/listingFix/dashboardHelpers";
 import {
   DASHBOARD_AGGREGATE_NO_ISSUE_LABEL,
@@ -62,6 +63,15 @@ import {
   logListingFixEvent,
   startTimer,
 } from "../features/listingFix/telemetry";
+import {
+  AI_LIMIT_MESSAGE,
+  SCAN_LIMIT_MESSAGE,
+  type ListingFixDailyUsageSnapshot,
+} from "../features/listingFix/usageLimits";
+import {
+  getRemainingUsage,
+  incrementScanUsage,
+} from "../features/listingFix/usage.server";
 
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -113,6 +123,7 @@ type LoaderFailure = {
   errorMessage: string;
   products: [];
   shop: string;
+  usage: ListingFixDailyUsageSnapshot;
 };
 
 type LoaderSuccess = {
@@ -120,11 +131,16 @@ type LoaderSuccess = {
   errorMessage: null;
   products: ClientCatalogProductRow[];
   shop: string;
+  usage: ListingFixDailyUsageSnapshot;
 };
 
 export type ListingFixHomeLoaderData = LoaderFailure | LoaderSuccess;
 
-type AuditActionFail = { ok: false; errorMessage: string };
+type AuditActionFail = {
+  ok: false;
+  errorMessage: string;
+  limitKind?: "scan";
+};
 
 type AuditActionSuccess = {
   ok: true;
@@ -143,6 +159,7 @@ export const loader = async ({
 }: LoaderFunctionArgs): Promise<ListingFixHomeLoaderData> => {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
+  const usage = await getRemainingUsage(shop);
   const timer = startTimer("load-catalog");
 
   const result = await fetchCatalogProducts(admin, 25);
@@ -158,6 +175,7 @@ export const loader = async ({
       errorMessage: result.errorMessage,
       products: [],
       shop,
+      usage,
     };
   }
 
@@ -166,6 +184,7 @@ export const loader = async ({
     errorMessage: null,
     products: result.products.map(toClientCatalogRow),
     shop,
+    usage,
   };
 };
 
@@ -184,6 +203,22 @@ export const action = async ({
   }
 
   try {
+    const usageGate = await incrementScanUsage(shop);
+    if (!usageGate.ok) {
+      logListingFixEvent({
+        action: "scan_failure",
+        shop,
+        durationMs: endTimer(timer),
+        message: usageGate.message,
+        meta: { limitKind: usageGate.limitKind },
+      });
+      return {
+        ok: false,
+        errorMessage: usageGate.message,
+        limitKind: "scan",
+      };
+    }
+
     const result = await fetchCatalogProducts(admin, 25);
     if (!result.ok) {
       logListingFixEvent({
@@ -365,7 +400,8 @@ export default function ListingFixHomePage() {
     });
     scanTimerRef.current = null;
     shopify.toast.show("Listing scan complete");
-  }, [fetcher.state, fetcher.data, fingerprint, shopDomain, shopify]);
+    void revalidator.revalidate();
+  }, [fetcher.state, fetcher.data, fingerprint, revalidator, shopDomain, shopify]);
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
@@ -387,12 +423,13 @@ export default function ListingFixHomePage() {
 
   const handleScanProducts = useCallback(() => {
     if (fetcher.state !== "idle") return;
+    if (data.usage.scansRemaining <= 0) return;
     scanTimerRef.current = startTimer("scan-products");
     logListingFixEvent({ action: "scan_start", shop: shopDomain, meta: { source: "client" } });
     const form = new FormData();
     form.set("intent", "audit");
     fetcher.submit(form, { method: "post" });
-  }, [fetcher, shopDomain]);
+  }, [data.usage.scansRemaining, fetcher, shopDomain]);
 
   const openProductDetails = useCallback((id: string) => {
     setDetailProductId(id);
@@ -400,8 +437,21 @@ export default function ListingFixHomePage() {
 
   const closeProductDetails = useCallback(() => setDetailProductId(null), []);
 
+  const scanLimitReached = data.usage.scansRemaining <= 0;
+
+  const scanLimitError =
+    fetcher.state === "idle" &&
+    fetcher.data &&
+    !fetcher.data.ok &&
+    fetcher.data.limitKind === "scan"
+      ? SCAN_LIMIT_MESSAGE
+      : null;
+
   const scanError =
-    fetcher.state === "idle" && fetcher.data && !fetcher.data.ok
+    fetcher.state === "idle" &&
+    fetcher.data &&
+    !fetcher.data.ok &&
+    fetcher.data.limitKind !== "scan"
       ? merchantFacingError(fetcher.data.errorMessage, "scan-products")
       : null;
 
@@ -443,9 +493,15 @@ export default function ListingFixHomePage() {
       aiIdleData.productId === detailProductId);
 
   const aiSuggestions = aiSuccess ? aiIdleData.suggestions : null;
-  const aiErrorMessage = aiFailure
-    ? merchantFacingError(aiIdleData?.error, "ai-suggestions")
-    : null;
+  const aiLimitReached = data.usage.aiRemaining <= 0;
+
+  const aiLimitError =
+    aiFailure && aiIdleData?.limitKind === "ai" ? AI_LIMIT_MESSAGE : null;
+
+  const aiErrorMessage =
+    aiFailure && aiIdleData?.limitKind !== "ai"
+      ? merchantFacingError(aiIdleData?.error, "ai-suggestions")
+      : null;
 
   const applyInFlight = applyFetcher.state !== "idle";
 
@@ -455,6 +511,7 @@ export default function ListingFixHomePage() {
   const handleGenerateAiSuggestions = useCallback(() => {
     if (!detailProductId || !detailAudit) return;
     if (aiFetcher.state !== "idle" || applyFetcher.state !== "idle") return;
+    if (data.usage.aiRemaining <= 0) return;
 
     setHighlightFreshAiSuggestions(false);
     if (aiHighlightDismissTimerRef.current != null) {
@@ -482,7 +539,14 @@ export default function ListingFixHomePage() {
       method: "post",
       action: "/app/ai-suggestions",
     });
-  }, [aiFetcher, applyFetcher.state, detailAudit, detailProductId, shopDomain]);
+  }, [
+    aiFetcher,
+    applyFetcher.state,
+    data.usage.aiRemaining,
+    detailAudit,
+    detailProductId,
+    shopDomain,
+  ]);
 
   useEffect(() => {
     setApplyOutcomeBanner(null);
@@ -542,7 +606,8 @@ export default function ListingFixHomePage() {
       });
     }
     aiTimerRef.current = null;
-  }, [aiFetcher.data, aiFetcher.state, shopDomain]);
+    void revalidator.revalidate();
+  }, [aiFetcher.data, aiFetcher.state, revalidator, shopDomain]);
 
   useEffect(() => {
     if (aiFetcher.state !== "idle") return;
@@ -983,7 +1048,12 @@ export default function ListingFixHomePage() {
         content: "Scan Products",
         onAction: handleScanProducts,
         loading: scanning,
-        disabled: !data.ok || data.products.length === 0 || scanning || catalogBusy,
+        disabled:
+          !data.ok ||
+          data.products.length === 0 ||
+          scanning ||
+          catalogBusy ||
+          scanLimitReached,
       }}
     >
       <Layout>
@@ -997,6 +1067,14 @@ export default function ListingFixHomePage() {
               </Banner>
             ) : null}
 
+            {scanLimitReached || scanLimitError ? (
+              <Banner tone="warning" title="Daily scan limit reached">
+                <Text as="p" variant="bodyMd">
+                  {scanLimitError ?? SCAN_LIMIT_MESSAGE}
+                </Text>
+              </Banner>
+            ) : null}
+
             {scanError ? (
               <Banner tone="critical" title="Scan failed">
                 <Text as="p" variant="bodyMd">
@@ -1004,6 +1082,8 @@ export default function ListingFixHomePage() {
                 </Text>
               </Banner>
             ) : null}
+
+            {data.ok ? <ListingFixBetaUsageCard usage={data.usage} /> : null}
 
             {!data.ok ? null : data.products.length === 0 ? (
               <Card roundedAbove="sm" padding="0">
@@ -1218,7 +1298,11 @@ export default function ListingFixHomePage() {
                                 <Button
                                   variant="primary"
                                   loading={scanning}
-                                  disabled={scanning || catalogBusy}
+                                  disabled={
+                                    scanning ||
+                                    catalogBusy ||
+                                    scanLimitReached
+                                  }
                                   onClick={handleScanProducts}
                                 >
                                   Scan Products
@@ -1358,7 +1442,20 @@ export default function ListingFixHomePage() {
                     you click <strong>Apply to Shopify</strong> beside a suggestion — nothing
                     syncs automatically and there is no bulk apply.
                   </Text>
+                  <InlineStack gap="200" wrap blockAlign="center">
+                    <Badge tone={aiLimitReached ? "critical" : "info"}>
+                      {`AI generations remaining today: ${data.usage.aiRemaining}`}
+                    </Badge>
+                  </InlineStack>
                 </BlockStack>
+
+                {aiLimitReached || aiLimitError ? (
+                  <Banner tone="warning" title="Daily AI generation limit reached">
+                    <Text as="p" variant="bodyMd">
+                      {aiLimitError ?? AI_LIMIT_MESSAGE}
+                    </Text>
+                  </Banner>
+                ) : null}
 
                 <InlineStack gap="300" wrap>
                   <Button
@@ -1367,7 +1464,8 @@ export default function ListingFixHomePage() {
                     disabled={
                       aiGenerating ||
                       applyInFlight ||
-                      !detailProduct
+                      !detailProduct ||
+                      aiLimitReached
                     }
                     onClick={handleGenerateAiSuggestions}
                   >
@@ -1411,7 +1509,10 @@ export default function ListingFixHomePage() {
                   </InlineStack>
                 ) : null}
 
-                {!aiErrorMessage && !aiGenerating && !aiSuggestions ? (
+                {!aiErrorMessage &&
+                !aiLimitError &&
+                !aiGenerating &&
+                !aiSuggestions ? (
                   <Banner tone="info" title="Generate tailored copy">
                     <Text as="p" variant="bodyMd">
                       Click <strong>Generate AI Fixes</strong> to draft title,

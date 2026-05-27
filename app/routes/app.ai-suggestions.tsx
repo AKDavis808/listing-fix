@@ -5,6 +5,7 @@ import {
   logListingFixEvent,
   startTimer,
 } from "../features/listingFix/telemetry";
+import { incrementAiUsage } from "../features/listingFix/usage.server";
 import { authenticate } from "../shopify.server";
 import { auditProduct } from "../services/productAudit.server";
 import { fetchProductById } from "../services/listingProducts.server";
@@ -24,7 +25,13 @@ export type AiSuggestionsActionData =
       };
       requestToken: string;
     }
-  | { ok: false; error: string; productId?: string; requestToken: string };
+  | {
+      ok: false;
+      error: string;
+      productId?: string;
+      requestToken: string;
+      limitKind?: "ai";
+    };
 
 function extractAiRequestToken(formData: FormData): string {
   const raw = formData.get("requestToken");
@@ -37,6 +44,7 @@ function failAi(
   error: unknown,
   productId?: string,
   requestToken = "",
+  limitKind?: "ai",
 ): AiSuggestionsActionData {
   const message =
     typeof error === "string"
@@ -51,9 +59,10 @@ function failAi(
     productId,
     durationMs: endTimer(timer),
     message,
+    meta: limitKind ? { limitKind } : undefined,
   });
 
-  return { ok: false, error: message, productId, requestToken };
+  return { ok: false, error: message, productId, requestToken, limitKind };
 }
 
 export const action = async ({
@@ -98,6 +107,18 @@ export const action = async ({
         "That product could not be loaded — it may no longer exist.",
         productId,
         requestToken,
+      );
+    }
+
+    const usageGate = await incrementAiUsage(shop);
+    if (!usageGate.ok) {
+      return failAi(
+        shop,
+        timer,
+        usageGate.message,
+        snapshot.id,
+        requestToken,
+        "ai",
       );
     }
 
