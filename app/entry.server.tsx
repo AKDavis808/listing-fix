@@ -5,6 +5,7 @@ import { createReadableStreamFromReadable } from "@react-router/node";
 import { type EntryContext } from "react-router";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
+import { logEmbeddedAuthEvent } from "./features/listingFix/embeddedAuth.server";
 
 export const streamTimeout = 5000;
 
@@ -14,6 +15,17 @@ export default async function handleRequest(
   responseHeaders: Headers,
   reactRouterContext: EntryContext
 ) {
+  const url = new URL(request.url);
+  const embedded = url.searchParams.get("embedded") === "1";
+  const secFetchDest = request.headers.get("sec-fetch-dest");
+
+  if (embedded || secFetchDest === "iframe") {
+    logEmbeddedAuthEvent("iframe_request", request, {
+      source: "entry.server",
+      secFetchDest,
+    });
+  }
+
   addDocumentResponseHeaders(request, responseHeaders);
   const userAgent = request.headers.get("user-agent");
   const callbackName = isbot(userAgent ?? '')

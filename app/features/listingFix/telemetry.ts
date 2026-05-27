@@ -18,7 +18,14 @@ export type ListingFixTelemetryAction =
   | "feedback_failed"
   | "scan_saved"
   | "scan_restored"
-  | "scan_deleted";
+  | "scan_deleted"
+  | "iframe_request"
+  | "embedded_detected"
+  | "auth_redirect"
+  | "oauth_start"
+  | "oauth_complete"
+  | "session_restored"
+  | "session_missing";
 
 export type ListingFixTelemetryEvent = {
   action: ListingFixTelemetryAction;
