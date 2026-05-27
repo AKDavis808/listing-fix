@@ -14,6 +14,8 @@ export type EmbeddedAuthEvent =
 type AuthLogMeta = Record<string, string | number | boolean | null | undefined>;
 
 const LOGIN_PATH = "/auth/login";
+const SESSION_TOKEN_PATH = "/auth/session-token";
+const REAUTH_URL_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
 
 function extractRequestContext(request: Request) {
   const url = new URL(request.url);
@@ -93,6 +95,95 @@ export function validateProductionShopifyEnv(): void {
   });
 }
 
+function isUnauthorizedResponse(error: unknown): error is Response {
+  return error instanceof Response && error.status === 401;
+}
+
+export function redirectToSessionTokenBounce(request: Request): never {
+  const url = new URL(request.url);
+  const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
+  const params = new URLSearchParams(url.searchParams);
+  params.delete("id_token");
+
+  const reloadParams = new URLSearchParams(url.searchParams);
+  reloadParams.delete("id_token");
+
+  params.set(
+    "shopify-reload",
+    `${appUrl}${url.pathname}?${reloadParams.toString()}`,
+  );
+
+  logEmbeddedAuthEvent("auth_redirect", request, {
+    target: SESSION_TOKEN_PATH,
+    source: "session_token_bounce",
+    preservedShop: Boolean(url.searchParams.get("shop")),
+    preservedHost: Boolean(url.searchParams.get("host")),
+  });
+
+  logListingFixEvent({
+    action: "auth_redirect_preserved",
+    shop: url.searchParams.get("shop"),
+    meta: {
+      target: SESSION_TOKEN_PATH,
+      preservedShop: Boolean(url.searchParams.get("shop")),
+      preservedHost: Boolean(url.searchParams.get("host")),
+    },
+  });
+
+  throw redirect(`${SESSION_TOKEN_PATH}?${params.toString()}`);
+}
+
+export function handleEmbeddedUnauthorized(
+  request: Request,
+  response: Response,
+): never {
+  const ctx = extractRequestContext(request);
+
+  logListingFixEvent({
+    action: "auth_401_caught",
+    shop: ctx.shop,
+    meta: {
+      pathname: ctx.pathname,
+      embedded: ctx.embedded,
+      hasHost: Boolean(ctx.host),
+      hasSessionTokenHeader: ctx.hasSessionTokenHeader,
+    },
+  });
+
+  const reauthUrl = response.headers.get(REAUTH_URL_HEADER);
+  if (reauthUrl) {
+    const requestUrl = new URL(request.url);
+    const target = new URL(reauthUrl, requestUrl.origin);
+
+    if (ctx.host) target.searchParams.set("host", ctx.host);
+    if (ctx.embedded) target.searchParams.set("embedded", "1");
+    if (ctx.shop && !target.searchParams.has("shop")) {
+      target.searchParams.set("shop", ctx.shop);
+    }
+
+    logListingFixEvent({
+      action: "auth_redirect_preserved",
+      shop: ctx.shop,
+      meta: {
+        source: "reauth_url_header",
+        target: target.pathname,
+      },
+    });
+
+    throw redirect(target.toString());
+  }
+
+  if (ctx.embedded && ctx.shop && ctx.host) {
+    redirectToSessionTokenBounce(request);
+  }
+
+  if (ctx.embedded && ctx.shop) {
+    redirectToLoginWithEmbeddedContext(request);
+  }
+
+  throw response;
+}
+
 function isRedirectResponse(error: unknown): error is Response {
   return (
     error instanceof Response &&
@@ -132,6 +223,16 @@ export function redirectToLoginWithEmbeddedContext(
     preservedHost: Boolean(host),
   });
 
+  logListingFixEvent({
+    action: "auth_redirect_preserved",
+    shop,
+    meta: {
+      target: LOGIN_PATH,
+      preservedShop: Boolean(shop),
+      preservedHost: Boolean(host),
+    },
+  });
+
   const query = params.toString();
   throw redirect(`${LOGIN_PATH}${query ? `?${query}` : ""}`);
 }
@@ -165,6 +266,9 @@ export async function authenticateEmbeddedAdmin<T extends AdminAuthResult>(
     });
     return result;
   } catch (error) {
+    if (isUnauthorizedResponse(error)) {
+      handleEmbeddedUnauthorized(request, error);
+    }
     if (isRedirectResponse(error) && isLoginRedirect(error)) {
       redirectToLoginWithEmbeddedContext(request);
     }

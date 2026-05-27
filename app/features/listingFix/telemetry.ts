@@ -31,7 +31,10 @@ export type ListingFixTelemetryAction =
   | "dashboard_loader"
   | "dashboard_render_error"
   | "app_bridge_ready"
-  | "app_bridge_missing";
+  | "app_bridge_missing"
+  | "auth_401_caught"
+  | "auth_reconnect_rendered"
+  | "auth_redirect_preserved";
 
 export type ListingFixTelemetryEvent = {
   action: ListingFixTelemetryAction;
@@ -99,7 +102,8 @@ function isFailureAction(action: ListingFixTelemetryAction): boolean {
     action === "usage_limit_hit" ||
     action === "feedback_failed" ||
     action === "dashboard_render_error" ||
-    action === "app_bridge_missing"
+    action === "app_bridge_missing" ||
+    action === "auth_401_caught"
   );
 }
 

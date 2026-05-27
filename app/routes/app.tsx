@@ -5,9 +5,11 @@ import { BlockStack } from "@shopify/polaris";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
+import { isRouteErrorResponse } from "react-router";
 
 import translations from "@shopify/polaris/locales/en.json";
 
+import { ListingFixAppAuthReconnect } from "../components/listingFix/ListingFixAppAuthReconnect";
 import { ListingFixAppNav } from "../components/listingFix/ListingFixAppNav";
 import { ListingFixEmbeddedBootstrap } from "../components/listingFix/ListingFixEmbeddedBootstrap";
 import { ListingFixErrorBoundary } from "../components/listingFix/ListingFixErrorBoundary";
@@ -48,16 +50,39 @@ export default function App() {
   );
 }
 
+function isUnauthorizedRouteError(error: unknown): boolean {
+  if (isRouteErrorResponse(error)) {
+    return error.status === 401;
+  }
+  return error instanceof Response && error.status === 401;
+}
+
 function AppRouteErrorBoundary() {
   const error = useRouteError();
 
   useEffect(() => {
+    if (isUnauthorizedRouteError(error)) {
+      logListingFixEvent({
+        action: "auth_401_caught",
+        meta: { boundary: "app_route" },
+      });
+      return;
+    }
+
     logListingFixEvent({
       action: "runtime_error",
       message: error,
       meta: { boundary: "app_route" },
     });
   }, [error]);
+
+  if (isUnauthorizedRouteError(error)) {
+    return <ListingFixAppAuthReconnect />;
+  }
+
+  if (error instanceof Response) {
+    return boundary.error(error);
+  }
 
   return boundary.error(error);
 }
