@@ -1,6 +1,7 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { useEffect } from "react";
+import { BlockStack } from "@shopify/polaris";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
@@ -8,6 +9,10 @@ import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
 import translations from "@shopify/polaris/locales/en.json";
 
 import { ListingFixErrorBoundary } from "../components/listingFix/ListingFixErrorBoundary";
+import {
+  ListingFixFeedbackFooter,
+  ListingFixFeedbackProvider,
+} from "../components/listingFix/ListingFixFeedback";
 import { ListingFixTelemetryBootstrap } from "../components/listingFix/ListingFixTelemetryBootstrap";
 import { logListingFixEvent } from "../features/listingFix/telemetry";
 import { authenticate } from "../shopify.server";
@@ -27,10 +32,15 @@ export default function App() {
       <PolarisAppProvider i18n={translations}>
         <ListingFixTelemetryBootstrap shop={shop} />
         <ListingFixErrorBoundary shop={shop}>
-          <s-app-nav>
-            <s-link href="/app">ListingFix</s-link>
-          </s-app-nav>
-          <Outlet />
+          <ListingFixFeedbackProvider shop={shop}>
+            <BlockStack gap="0">
+              <s-app-nav>
+                <s-link href="/app">ListingFix</s-link>
+              </s-app-nav>
+              <Outlet />
+              <ListingFixFeedbackFooter />
+            </BlockStack>
+          </ListingFixFeedbackProvider>
         </ListingFixErrorBoundary>
       </PolarisAppProvider>
     </AppProvider>

@@ -43,3 +43,18 @@ model ShopUsageDaily {
   @@unique([shop, usageDate])
   @@index([shop])
 }
+
+model BetaFeedback {
+  id            String   @id @default(cuid())
+  shopDomain    String
+  feedbackType  String
+  message       String
+  optionalEmail String?
+  appVersion    String?
+  currentRoute  String?
+  browserInfo   String?
+  createdAt     DateTime @default(now())
+
+  @@index([shopDomain])
+  @@index([createdAt])
+}

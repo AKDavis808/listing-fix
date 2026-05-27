@@ -13,7 +13,9 @@ export type ListingFixTelemetryAction =
   | "runtime_error"
   | "usage_limit_hit"
   | "usage_increment"
-  | "usage_remaining";
+  | "usage_remaining"
+  | "feedback_submitted"
+  | "feedback_failed";
 
 export type ListingFixTelemetryEvent = {
   action: ListingFixTelemetryAction;
@@ -78,7 +80,8 @@ function isFailureAction(action: ListingFixTelemetryAction): boolean {
     action === "filter_interaction_error" ||
     action === "runtime_error" ||
     action === "catalog_load_failure" ||
-    action === "usage_limit_hit"
+    action === "usage_limit_hit" ||
+    action === "feedback_failed"
   );
 }
 

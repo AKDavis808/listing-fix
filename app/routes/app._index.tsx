@@ -39,6 +39,7 @@ import { ListingFixBetaBadge } from "../components/listingFix/ListingFixBetaBadg
 import { ListingFixActionReassurance } from "../components/listingFix/ListingFixActionReassurance";
 import { ListingFixFirstScanPrompt } from "../components/listingFix/ListingFixFirstScanPrompt";
 import { ListingFixTrustPanel } from "../components/listingFix/ListingFixTrustPanel";
+import { useListingFixFeedback } from "../components/listingFix/ListingFixFeedback";
 import type { AuditedCatalogProductRow } from "../features/listingFix/dashboardHelpers";
 import {
   DASHBOARD_AGGREGATE_NO_ISSUE_LABEL,
@@ -1047,6 +1048,8 @@ export default function ListingFixHomePage() {
     dashboardFilterForUi.mode === "none"
       ? ""
       : catalogFilterBadgeLabel(dashboardFilterForUi);
+  const { openFeedback } = useListingFixFeedback();
+
   return (
     <Page
       fullWidth
@@ -1054,6 +1057,12 @@ export default function ListingFixHomePage() {
       title="ListingFix"
       titleMetadata={<ListingFixBetaBadge />}
       subtitle="Review catalog quality, get recommendations, and apply changes only when you choose."
+      secondaryActions={[
+        {
+          content: "Beta Feedback",
+          onAction: openFeedback,
+        },
+      ]}
       primaryAction={{
         content: "Scan Products",
         onAction: handleScanProducts,

@@ -136,3 +136,12 @@ body {
 .listing-fix-page-intro {
   max-width: 42rem;
 }
+
+.listing-fix-feedback-footer {
+  border-top: 1px solid var(--p-color-border-secondary);
+  background: color-mix(
+    in oklab,
+    var(--p-color-bg-surface-secondary) 90%,
+    transparent
+  );
+}
