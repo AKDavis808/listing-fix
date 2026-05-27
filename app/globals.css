@@ -75,3 +75,64 @@ body {
   opacity: 0.55;
   pointer-events: none;
 }
+
+/* Trust + onboarding surfaces */
+.listing-fix-trust-panel {
+  border-radius: var(--p-border-radius-300);
+}
+
+.listing-fix-trust-panel .Polaris-Card {
+  border: 1px solid color-mix(in oklab, var(--p-color-border) 88%, transparent);
+  border-left: 3px solid var(--p-color-bg-fill-success);
+  box-shadow: var(--p-shadow-100);
+}
+
+.listing-fix-trust-section {
+  border: 1px solid var(--p-color-border-secondary);
+  border-radius: var(--p-border-radius-200);
+  background: color-mix(
+    in oklab,
+    var(--p-color-bg-surface-secondary) 92%,
+    var(--p-color-bg-fill-success) 8%
+  );
+}
+
+.listing-fix-trust-section-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--p-border-radius-150);
+  background: color-mix(
+    in oklab,
+    var(--p-color-bg-fill-success-secondary) 55%,
+    transparent
+  );
+}
+
+.listing-fix-action-reassurance {
+  padding: var(--p-space-200) var(--p-space-300);
+  border-radius: var(--p-border-radius-200);
+  border: 1px solid var(--p-color-border-secondary);
+  border-left: 2px solid var(--p-color-border-success);
+  background: var(--p-color-bg-surface-secondary);
+}
+
+.listing-fix-first-scan-prompt .Polaris-Card {
+  border: 1px dashed var(--p-color-border-secondary);
+  background: color-mix(
+    in oklab,
+    var(--p-color-bg-surface) 94%,
+    var(--p-color-bg-fill-success) 6%
+  );
+}
+
+.listing-fix-beta-usage-card {
+  border: 1px solid var(--p-color-border-secondary);
+  background: var(--p-color-bg-surface-secondary);
+}
+
+.listing-fix-page-intro {
+  max-width: 42rem;
+}

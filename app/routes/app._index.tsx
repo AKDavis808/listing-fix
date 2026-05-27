@@ -35,6 +35,10 @@ import {
 
 import { ListingFixDashboardMetricTile } from "../components/listingFix/ListingFixDashboardMetricTile";
 import { ListingFixBetaUsageCard } from "../components/listingFix/ListingFixBetaUsageCard";
+import { ListingFixBetaBadge } from "../components/listingFix/ListingFixBetaBadge";
+import { ListingFixActionReassurance } from "../components/listingFix/ListingFixActionReassurance";
+import { ListingFixFirstScanPrompt } from "../components/listingFix/ListingFixFirstScanPrompt";
+import { ListingFixTrustPanel } from "../components/listingFix/ListingFixTrustPanel";
 import type { AuditedCatalogProductRow } from "../features/listingFix/dashboardHelpers";
 import {
   DASHBOARD_AGGREGATE_NO_ISSUE_LABEL,
@@ -72,6 +76,11 @@ import {
   getRemainingUsage,
   incrementScanUsage,
 } from "../features/listingFix/usage.server";
+import {
+  FIRST_SCAN_BODY,
+  FIRST_SCAN_HEADING,
+  REASSURANCE,
+} from "../features/listingFix/trustCopy";
 
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -1043,7 +1052,8 @@ export default function ListingFixHomePage() {
       fullWidth
       compactTitle
       title="ListingFix"
-      subtitle="Listing quality audits for your first 25 catalog products."
+      titleMetadata={<ListingFixBetaBadge />}
+      subtitle="Review catalog quality, get recommendations, and apply changes only when you choose."
       primaryAction={{
         content: "Scan Products",
         onAction: handleScanProducts,
@@ -1059,6 +1069,10 @@ export default function ListingFixHomePage() {
       <Layout>
         <Layout.Section>
           <BlockStack gap="500">
+            <Box className="listing-fix-page-intro">
+              <ListingFixActionReassurance message={REASSURANCE.scan} />
+            </Box>
+
             {!data.ok && catalogLoadError ? (
               <Banner tone="critical" title="Couldn't load products">
                 <Text as="p" variant="bodyMd">
@@ -1083,7 +1097,12 @@ export default function ListingFixHomePage() {
               </Banner>
             ) : null}
 
-            {data.ok ? <ListingFixBetaUsageCard usage={data.usage} /> : null}
+            {data.ok ? (
+              <>
+                <ListingFixTrustPanel />
+                <ListingFixBetaUsageCard usage={data.usage} />
+              </>
+            ) : null}
 
             {!data.ok ? null : data.products.length === 0 ? (
               <Card roundedAbove="sm" padding="0">
@@ -1194,12 +1213,11 @@ export default function ListingFixHomePage() {
                 </BlockStack>
 
                 {!hasScannedSession && !scanning ? (
-                  <Banner tone="info" title="Ready when you are">
-                    <Text as="p" variant="bodyMd">
-                      Select <strong>Scan Products</strong> to score your first 25
-                      listings. Results stay available while this admin tab is open.
-                    </Text>
-                  </Banner>
+                  <ListingFixFirstScanPrompt
+                    scanning={scanning}
+                    disabled={catalogBusy || scanLimitReached}
+                    onScan={handleScanProducts}
+                  />
                 ) : null}
 
                 {scanning ? (
@@ -1275,7 +1293,7 @@ export default function ListingFixHomePage() {
                               ? "No products match this focus"
                               : hasScannedSession
                                 ? "Nothing to show"
-                                : "No scan results yet"
+                                : FIRST_SCAN_HEADING
                           }
                           fullWidth={false}
                         >
@@ -1285,8 +1303,18 @@ export default function ListingFixHomePage() {
                                 ? "Try clearing the Overview focus or choose a different metric card."
                                 : hasScannedSession
                                   ? "Your catalog list is empty — add products in Shopify Admin, then reload."
-                                  : "Run Scan Products to populate scores, issues, and recommendations for this catalog."}
+                                  : FIRST_SCAN_BODY}
                             </Text>
+                            {!hasScannedSession && !dashboardFilterActive ? (
+                              <Text
+                                as="p"
+                                variant="bodySm"
+                                alignment="center"
+                                tone="subdued"
+                              >
+                                {REASSURANCE.scan}
+                              </Text>
+                            ) : null}
                             {dashboardFilterActive ? (
                               <InlineStack gap="300" justify="center">
                                 <Button onClick={clearDashboardCatalogFilter}>
@@ -1457,7 +1485,7 @@ export default function ListingFixHomePage() {
                   </Banner>
                 ) : null}
 
-                <InlineStack gap="300" wrap>
+                <InlineStack gap="300" wrap blockAlign="center">
                   <Button
                     variant="primary"
                     loading={aiGenerating}
@@ -1472,6 +1500,7 @@ export default function ListingFixHomePage() {
                     Generate AI Fixes
                   </Button>
                 </InlineStack>
+                <ListingFixActionReassurance message={REASSURANCE.ai} />
 
                 {aiErrorMessage ? (
                   <Banner tone="critical" title="Couldn't generate AI suggestions">
@@ -1513,11 +1542,11 @@ export default function ListingFixHomePage() {
                 !aiLimitError &&
                 !aiGenerating &&
                 !aiSuggestions ? (
-                  <Banner tone="info" title="Generate tailored copy">
+                  <Banner tone="info" title="Review before you apply">
                     <Text as="p" variant="bodyMd">
-                      Click <strong>Generate AI Fixes</strong> to draft title,
-                      description, tags, and SEO ideas based on this product&apos;s
-                      audit. Review everything before applying to Shopify.
+                      Generate recommendations for title, description, tags, and SEO
+                      based on this product&apos;s audit. Edit anything you like before
+                      applying a single field to Shopify.
                     </Text>
                   </Banner>
                 ) : null}
@@ -1671,6 +1700,7 @@ export default function ListingFixHomePage() {
                           </Button>
                         </InlineStack>
                       </InlineStack>
+                      <ListingFixActionReassurance message={REASSURANCE.apply} />
 
                       {aiSuggestions.suggestedTags.length === 0 ? (
                         <Text as="p" variant="bodyMd" tone="subdued">
@@ -1691,11 +1721,11 @@ export default function ListingFixHomePage() {
               </BlockStack>
             </BlockStack>
           ) : (
-            <Banner tone="info" title="Run a listing scan">
+            <Banner tone="info" title="Scan this product first">
               <Text as="p" variant="bodyMd">
-                Use <strong>Scan Products</strong> to analyze this catalog. You can
-                then reopen details to see scores, issues, and step-by-step fix ideas
-                — nothing here changes your Shopify data.
+                Run <strong>Scan Products</strong> on your catalog to see scores,
+                recommendations, and optional AI copy for this listing. Your Shopify
+                catalog stays unchanged until you choose to apply a field.
               </Text>
             </Banner>
           )}
@@ -1774,6 +1804,9 @@ function AiSuggestionPreviewBlock({
           </Button>
         </InlineStack>
       </InlineStack>
+      {canApply ? (
+        <ListingFixActionReassurance message={REASSURANCE.apply} />
+      ) : null}
       <Card padding="400">
         {bodyVariant === "preformatted" ? (
           <pre
