@@ -1,5 +1,10 @@
 import type { ActionFunctionArgs } from "react-router";
 
+import {
+  endTimer,
+  logListingFixEvent,
+  startTimer,
+} from "../features/listingFix/telemetry";
 import { authenticate } from "../shopify.server";
 import {
   assertProductGid,
@@ -34,15 +39,35 @@ function extractRequestToken(formData: FormData): string {
   return typeof raw === "string" ? raw : "";
 }
 
+function logApplyFailure(
+  shop: string,
+  timer: ReturnType<typeof startTimer>,
+  productId: string,
+  field: ApplyListingFieldKind,
+  message: unknown,
+) {
+  logListingFixEvent({
+    action: "apply_failure",
+    shop,
+    productId: productId || undefined,
+    durationMs: endTimer(timer),
+    message,
+    meta: { field },
+  });
+}
+
 export const action = async ({
   request,
 }: ActionFunctionArgs): Promise<ApplyListingFieldActionData> => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
+  const timer = startTimer("apply-listing-field");
 
   let formData: FormData;
   try {
     formData = await request.formData();
-  } catch {
+  } catch (error) {
+    logApplyFailure(shop, timer, "", "title", error);
     return {
       ok: false,
       errorMessage: "Invalid form submission.",
@@ -55,6 +80,7 @@ export const action = async ({
   const requestToken = extractRequestToken(formData);
 
   if (formData.get("intent") !== "apply-listing-field") {
+    logApplyFailure(shop, timer, "", "title", "Unsupported intent.");
     return {
       ok: false,
       errorMessage: "Unsupported intent.",
@@ -78,6 +104,15 @@ export const action = async ({
       : null;
 
   if (!resolvedProduct || !resolvedField) {
+    logApplyFailure(
+      shop,
+      timer,
+      resolvedProduct ?? "",
+      resolvedField ?? "title",
+      resolvedProduct
+        ? "Unknown listing field reference."
+        : "Select a catalog product before applying changes.",
+    );
     return {
       ok: false,
       errorMessage: resolvedProduct
@@ -92,12 +127,28 @@ export const action = async ({
   const productId = resolvedProduct;
   const field = resolvedField;
 
+  logListingFixEvent({
+    action: "apply_start",
+    shop,
+    productId,
+    meta: { field },
+  });
+
   function finalizeOutcome(
     outcome: ProductFieldUpdateResult,
   ): ApplyListingFieldActionData {
     if (outcome.ok) {
+      logListingFixEvent({
+        action: "apply_success",
+        shop,
+        productId,
+        durationMs: endTimer(timer),
+        meta: { field },
+      });
       return { ok: true, productId, field, requestToken };
     }
+
+    logApplyFailure(shop, timer, productId, field, outcome.errorMessage);
     return {
       ok: false,
       errorMessage: outcome.errorMessage,
@@ -109,6 +160,7 @@ export const action = async ({
   }
 
   function missingPayload(message: string): ApplyListingFieldActionData {
+    logApplyFailure(shop, timer, productId, field, message);
     return {
       ok: false,
       errorMessage: message,
@@ -118,65 +170,84 @@ export const action = async ({
     };
   }
 
-  switch (field) {
-    case "title": {
-      const value = formData.get("value");
-      if (typeof value !== "string") {
-        return missingPayload("Missing title payload.");
+  try {
+    switch (field) {
+      case "title": {
+        const value = formData.get("value");
+        if (typeof value !== "string") {
+          return missingPayload("Missing title payload.");
+        }
+        return finalizeOutcome(
+          await updateProductTitle(admin, productId, value),
+        );
       }
-      return finalizeOutcome(
-        await updateProductTitle(admin, productId, value),
-      );
-    }
-    case "description": {
-      const value = formData.get("value");
-      if (typeof value !== "string") {
-        return missingPayload("Missing description payload.");
+      case "description": {
+        const value = formData.get("value");
+        if (typeof value !== "string") {
+          return missingPayload("Missing description payload.");
+        }
+        return finalizeOutcome(
+          await updateProductDescription(admin, productId, value),
+        );
       }
-      return finalizeOutcome(
-        await updateProductDescription(admin, productId, value),
-      );
-    }
-    case "seo": {
-      const value = formData.get("value");
-      if (typeof value !== "string") {
-        return missingPayload("Missing SEO description payload.");
+      case "seo": {
+        const value = formData.get("value");
+        if (typeof value !== "string") {
+          return missingPayload("Missing SEO description payload.");
+        }
+        return finalizeOutcome(await updateProductSEO(admin, productId, value));
       }
-      return finalizeOutcome(await updateProductSEO(admin, productId, value));
-    }
-    case "tags": {
-      const raw = formData.get("tagsJson");
-      if (typeof raw !== "string") {
-        return missingPayload("Missing tags payload.");
-      }
+      case "tags": {
+        const raw = formData.get("tagsJson");
+        if (typeof raw !== "string") {
+          return missingPayload("Missing tags payload.");
+        }
 
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return {
-          ok: false,
-          errorMessage: "Could not decode tags.",
-          productId,
-          field,
-          requestToken,
-        };
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (error) {
+          logApplyFailure(shop, timer, productId, field, error);
+          return {
+            ok: false,
+            errorMessage: "Could not decode tags.",
+            productId,
+            field,
+            requestToken,
+          };
+        }
+
+        if (!Array.isArray(parsed)) {
+          logApplyFailure(
+            shop,
+            timer,
+            productId,
+            field,
+            "Tags must be formatted as an array.",
+          );
+          return {
+            ok: false,
+            errorMessage: "Tags must be formatted as an array.",
+            productId,
+            field,
+            requestToken,
+          };
+        }
+
+        const tags = parsed.filter((t): t is string => typeof t === "string");
+
+        return finalizeOutcome(await updateProductTags(admin, productId, tags));
       }
-
-      if (!Array.isArray(parsed)) {
-        return {
-          ok: false,
-          errorMessage: "Tags must be formatted as an array.",
-          productId,
-          field,
-          requestToken,
-        };
-      }
-
-      const tags = parsed.filter((t): t is string => typeof t === "string");
-
-      return finalizeOutcome(await updateProductTags(admin, productId, tags));
     }
+  } catch (error) {
+    logApplyFailure(shop, timer, productId, field, error);
+    return {
+      ok: false,
+      errorMessage: "Could not apply this change right now.",
+      productId,
+      field,
+      requestToken,
+    };
   }
 };
 

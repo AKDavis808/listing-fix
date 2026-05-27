@@ -3,6 +3,7 @@ import type { BadgeProps } from "@shopify/polaris";
 import type { ProductAuditOutcome } from "../../services/productAudit.server";
 import type { ClientCatalogProductRow } from "../../services/listingProducts.server";
 import type { IssueRecommendationPair } from "../../services/productRecommendations.server";
+import { sanitizeErrorMessage } from "./telemetry";
 
 /** Row returned after `/app` scan POST (audit + recommendations, in-memory only). */
 export type AuditedCatalogProductRow = ClientCatalogProductRow &
@@ -64,12 +65,14 @@ export function normalizeDashboardFilter(
 
 /** Strip stack traces / huge blobs from shopper-facing banners. Logs detail to console. */
 export function merchantFacingError(raw: unknown, ctx: string): string {
-  const text =
+  const rawText =
     typeof raw === "string"
       ? raw.trim()
       : raw != null && typeof (raw as { message?: unknown }).message === "string"
         ? String((raw as { message: string }).message).trim()
         : "";
+
+  const text = sanitizeErrorMessage(raw) || sanitizeErrorMessage(rawText);
 
   if (!text) {
     console.warn(`[ListingFix:${ctx}] Empty error`);
@@ -77,13 +80,13 @@ export function merchantFacingError(raw: unknown, ctx: string): string {
   }
 
   const looksTechnical =
-    /^\s*(Error|TypeError|ReferenceError):/i.test(text) ||
-    /\sat\s\S+\([^)]*\)/m.test(text) ||
-    /\n\s+at\s/.test(text);
+    /^\s*(Error|TypeError|ReferenceError):/i.test(rawText) ||
+    /\sat\s\S+\([^)]*\)/m.test(rawText) ||
+    /\n\s+at\s/.test(rawText);
 
   const networkish =
     /network|ECONNRESET|ECONNREFUSED|fetch.*fail|timed?\s?out|failed to fetch/i.test(
-      text,
+      rawText || text,
     );
 
   if (looksTechnical || text.length > 320) {

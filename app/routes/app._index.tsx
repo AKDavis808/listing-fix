@@ -57,6 +57,11 @@ import {
   loadPersistedDashboard,
   persistDashboardSnapshot,
 } from "../features/listingFix/scanPersist";
+import {
+  endTimer,
+  logListingFixEvent,
+  startTimer,
+} from "../features/listingFix/telemetry";
 
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -107,12 +112,14 @@ type LoaderFailure = {
   ok: false;
   errorMessage: string;
   products: [];
+  shop: string;
 };
 
 type LoaderSuccess = {
   ok: true;
   errorMessage: null;
   products: ClientCatalogProductRow[];
+  shop: string;
 };
 
 export type ListingFixHomeLoaderData = LoaderFailure | LoaderSuccess;
@@ -134,14 +141,23 @@ export type { DashboardCatalogFilter } from "../features/listingFix/dashboardHel
 export const loader = async ({
   request,
 }: LoaderFunctionArgs): Promise<ListingFixHomeLoaderData> => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
+  const timer = startTimer("load-catalog");
 
   const result = await fetchCatalogProducts(admin, 25);
   if (!result.ok) {
+    logListingFixEvent({
+      action: "catalog_load_failure",
+      shop,
+      durationMs: endTimer(timer),
+      message: result.errorMessage,
+    });
     return {
       ok: false,
       errorMessage: result.errorMessage,
       products: [],
+      shop,
     };
   }
 
@@ -149,37 +165,65 @@ export const loader = async ({
     ok: true,
     errorMessage: null,
     products: result.products.map(toClientCatalogRow),
+    shop,
   };
 };
 
 export const action = async ({
   request,
 }: ActionFunctionArgs): Promise<ListingFixAuditActionData> => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
+  const timer = startTimer("scan-products");
+  logListingFixEvent({ action: "scan_start", shop });
+
   const formData = await request.formData();
 
   if (formData.get("intent") !== "audit") {
     return null;
   }
 
-  const result = await fetchCatalogProducts(admin, 25);
-  if (!result.ok) {
-    return { ok: false, errorMessage: result.errorMessage };
-  }
+  try {
+    const result = await fetchCatalogProducts(admin, 25);
+    if (!result.ok) {
+      logListingFixEvent({
+        action: "scan_failure",
+        shop,
+        durationMs: endTimer(timer),
+        message: result.errorMessage,
+      });
+      return { ok: false, errorMessage: result.errorMessage };
+    }
 
-  const audited: AuditedCatalogProductRow[] = result.products.map((p) => {
-    const audit = auditProduct({
-      title: p.title,
-      descriptionHtml: p.descriptionHtml,
-      productType: p.productType,
-      tags: p.tags,
-      variantsCount: p.variantsCount,
+    const audited: AuditedCatalogProductRow[] = result.products.map((p) => {
+      const audit = auditProduct({
+        title: p.title,
+        descriptionHtml: p.descriptionHtml,
+        productType: p.productType,
+        tags: p.tags,
+        variantsCount: p.variantsCount,
+      });
+      const recommendations = recommendationsForIssues(audit.issues);
+      return { ...toClientCatalogRow(p), ...audit, recommendations };
     });
-    const recommendations = recommendationsForIssues(audit.issues);
-    return { ...toClientCatalogRow(p), ...audit, recommendations };
-  });
 
-  return { ok: true, audited };
+    logListingFixEvent({
+      action: "scan_success",
+      shop,
+      durationMs: endTimer(timer),
+      meta: { productCount: audited.length },
+    });
+
+    return { ok: true, audited };
+  } catch (error) {
+    logListingFixEvent({
+      action: "scan_failure",
+      shop,
+      durationMs: endTimer(timer),
+      message: error,
+    });
+    throw error;
+  }
 };
 
 const EMPTY_CATALOG_IMG =
@@ -210,7 +254,11 @@ export default function ListingFixHomePage() {
 
   const applySeqCounterRef = useRef(0);
   const expectedListingApplyTokenRef = useRef<string | null>(null);
-  const lastScanResultRef = useRef<ListingFixAuditActionData>(null);
+  const lastScanResultRef = useRef<ListingFixAuditActionData | null>(null);
+  const scanTimerRef = useRef<ReturnType<typeof startTimer> | null>(null);
+  const lastLoggedScanFailureRef = useRef<ListingFixAuditActionData | null>(null);
+  const lastLoggedAiOutcomeRef = useRef<AiSuggestionsActionData | null>(null);
+  const lastLoggedApplyOutcomeRef = useRef<ApplyListingFieldActionData | null>(null);
 
   /** Scroll/highlight: anchored modal region + transient pulse + ledger per catalog product ID. */
   const aiResultsAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -254,6 +302,8 @@ export default function ListingFixHomePage() {
   }, [dashboardFilter]);
 
   const fingerprint = data.ok ? data.products.map((p) => p.id).join("|") : "";
+
+  const shopDomain = data.shop;
 
   useEffect(() => {
     if (!data.ok || !fingerprint.length) {
@@ -305,15 +355,44 @@ export default function ListingFixHomePage() {
       next,
       normalizeDashboardFilter(dashboardFilterRef.current),
     );
+    logListingFixEvent({
+      action: "scan_success",
+      shop: shopDomain,
+      durationMs: scanTimerRef.current
+        ? endTimer(scanTimerRef.current)
+        : undefined,
+      meta: { productCount: Object.keys(next).length, source: "client" },
+    });
+    scanTimerRef.current = null;
     shopify.toast.show("Listing scan complete");
-  }, [fetcher.state, fetcher.data, fingerprint, shopify]);
+  }, [fetcher.state, fetcher.data, fingerprint, shopDomain, shopify]);
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if (fetcher.data.ok) return;
+    if (lastLoggedScanFailureRef.current === fetcher.data) return;
+    lastLoggedScanFailureRef.current = fetcher.data;
+
+    logListingFixEvent({
+      action: "scan_failure",
+      shop: shopDomain,
+      durationMs: scanTimerRef.current
+        ? endTimer(scanTimerRef.current)
+        : undefined,
+      message: fetcher.data.errorMessage,
+      meta: { source: "client" },
+    });
+    scanTimerRef.current = null;
+  }, [fetcher.state, fetcher.data, shopDomain]);
 
   const handleScanProducts = useCallback(() => {
     if (fetcher.state !== "idle") return;
+    scanTimerRef.current = startTimer("scan-products");
+    logListingFixEvent({ action: "scan_start", shop: shopDomain, meta: { source: "client" } });
     const form = new FormData();
     form.set("intent", "audit");
     fetcher.submit(form, { method: "post" });
-  }, [fetcher]);
+  }, [fetcher, shopDomain]);
 
   const openProductDetails = useCallback((id: string) => {
     setDetailProductId(id);
@@ -329,6 +408,16 @@ export default function ListingFixHomePage() {
   const catalogLoadError = !data.ok
     ? merchantFacingError(data.errorMessage, "load-catalog")
     : null;
+
+  useEffect(() => {
+    if (data.ok) return;
+    logListingFixEvent({
+      action: "catalog_load_failure",
+      shop: shopDomain,
+      message: data.errorMessage,
+      meta: { source: "client" },
+    });
+  }, [data.errorMessage, data.ok, shopDomain]);
 
   const detailProduct =
     detailProductId != null && data.ok
@@ -360,6 +449,9 @@ export default function ListingFixHomePage() {
 
   const applyInFlight = applyFetcher.state !== "idle";
 
+  const aiTimerRef = useRef<ReturnType<typeof startTimer> | null>(null);
+  const applyTimerRef = useRef<ReturnType<typeof startTimer> | null>(null);
+
   const handleGenerateAiSuggestions = useCallback(() => {
     if (!detailProductId || !detailAudit) return;
     if (aiFetcher.state !== "idle" || applyFetcher.state !== "idle") return;
@@ -373,6 +465,14 @@ export default function ListingFixHomePage() {
     aiSuggestionRoundRef.current += 1;
     const requestToken = `lf_ai_${detailProductId}_${aiSuggestionRoundRef.current}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 
+    aiTimerRef.current = startTimer("ai-suggestions");
+    logListingFixEvent({
+      action: "ai_start",
+      shop: shopDomain,
+      productId: detailProductId,
+      meta: { source: "client" },
+    });
+
     const form = new FormData();
     form.set("intent", "ai-suggestions");
     form.set("productId", detailProductId);
@@ -382,7 +482,7 @@ export default function ListingFixHomePage() {
       method: "post",
       action: "/app/ai-suggestions",
     });
-  }, [aiFetcher, detailAudit, detailProductId]);
+  }, [aiFetcher, applyFetcher.state, detailAudit, detailProductId, shopDomain]);
 
   useEffect(() => {
     setApplyOutcomeBanner(null);
@@ -411,6 +511,39 @@ export default function ListingFixHomePage() {
   }, [applySuccessBadgeField]);
 
   /** After each NEW AI success, gently scroll modal content to suggestions + brief outline pulse. */
+  useEffect(() => {
+    if (aiFetcher.state !== "idle") return;
+
+    const outcome = aiFetcher.data ?? null;
+    if (!outcome) return;
+    if (lastLoggedAiOutcomeRef.current === outcome) return;
+    lastLoggedAiOutcomeRef.current = outcome;
+
+    if (outcome.ok) {
+      logListingFixEvent({
+        action: "ai_success",
+        shop: shopDomain,
+        productId: outcome.productId,
+        durationMs: aiTimerRef.current
+          ? endTimer(aiTimerRef.current)
+          : undefined,
+        meta: { source: "client" },
+      });
+    } else {
+      logListingFixEvent({
+        action: "ai_failure",
+        shop: shopDomain,
+        productId: outcome.productId,
+        durationMs: aiTimerRef.current
+          ? endTimer(aiTimerRef.current)
+          : undefined,
+        message: outcome.error,
+        meta: { source: "client" },
+      });
+    }
+    aiTimerRef.current = null;
+  }, [aiFetcher.data, aiFetcher.state, shopDomain]);
+
   useEffect(() => {
     if (aiFetcher.state !== "idle") return;
 
@@ -479,6 +612,33 @@ export default function ListingFixHomePage() {
     expectedListingApplyTokenRef.current = null;
     setTrackedApplyField(null);
 
+    if (lastLoggedApplyOutcomeRef.current !== response) {
+      lastLoggedApplyOutcomeRef.current = response;
+      if (response.ok) {
+        logListingFixEvent({
+          action: "apply_success",
+          shop: shopDomain,
+          productId: response.productId,
+          durationMs: applyTimerRef.current
+            ? endTimer(applyTimerRef.current)
+            : undefined,
+          meta: { field: response.field, source: "client" },
+        });
+      } else {
+        logListingFixEvent({
+          action: "apply_failure",
+          shop: shopDomain,
+          productId: response.productId,
+          durationMs: applyTimerRef.current
+            ? endTimer(applyTimerRef.current)
+            : undefined,
+          message: response.errorMessage,
+          meta: { field: response.field, source: "client" },
+        });
+      }
+      applyTimerRef.current = null;
+    }
+
     if (response.ok) {
       shopify.toast.show(formatApplyConfirmation(response.field));
       setApplyOutcomeBanner({
@@ -512,6 +672,7 @@ export default function ListingFixHomePage() {
     applyFetcher.state,
     detailProductId,
     revalidator,
+    shopDomain,
     shopify,
     trackedApplyField,
   ]);
@@ -534,12 +695,19 @@ export default function ListingFixHomePage() {
       setApplyOutcomeBanner(null);
       setApplySuccessBadgeField(null);
       setTrackedApplyField(field);
+      applyTimerRef.current = startTimer("apply-listing-field");
+      logListingFixEvent({
+        action: "apply_start",
+        shop: shopDomain,
+        productId: detailProductId,
+        meta: { field, source: "client" },
+      });
       applyFetcher.submit(form, {
         method: "post",
         action: "/app/apply-listing-field",
       });
     },
-    [applyFetcher, detailProductId],
+    [applyFetcher, detailProductId, shopDomain],
   );
 
   useEffect(() => {
@@ -581,8 +749,17 @@ export default function ListingFixHomePage() {
   );
 
   const clearDashboardCatalogFilter = useCallback(() => {
-    setDashboardFilter({ mode: "none" });
-  }, []);
+    try {
+      setDashboardFilter({ mode: "none" });
+    } catch (error) {
+      logListingFixEvent({
+        action: "filter_interaction_error",
+        shop: shopDomain,
+        message: error,
+        meta: { operation: "clear_filter" },
+      });
+    }
+  }, [shopDomain]);
 
   const toggleDashboardCatalogSlice = useCallback(
     (
@@ -593,43 +770,52 @@ export default function ListingFixHomePage() {
         | "most_common_issue",
       issueSeed?: string,
     ) => {
-      setDashboardFilter((prev) => {
-        switch (slot) {
-          case "scanned_products":
-            return prev.mode === "scanned"
-              ? { mode: "none" }
-              : { mode: "scanned" };
-          case "average_scores":
-            return prev.mode === "lowest_score"
-              ? { mode: "none" }
-              : { mode: "lowest_score" };
-          case "needs_attention":
-            return prev.mode === "needs_attention"
-              ? { mode: "none" }
-              : { mode: "needs_attention" };
-          case "most_common_issue": {
-            const issue =
-              typeof issueSeed === "string" ? issueSeed.trim() : "";
-            if (
-              !issue.length ||
-              issue === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL
-            ) {
-              return prev;
+      try {
+        setDashboardFilter((prev) => {
+          switch (slot) {
+            case "scanned_products":
+              return prev.mode === "scanned"
+                ? { mode: "none" }
+                : { mode: "scanned" };
+            case "average_scores":
+              return prev.mode === "lowest_score"
+                ? { mode: "none" }
+                : { mode: "lowest_score" };
+            case "needs_attention":
+              return prev.mode === "needs_attention"
+                ? { mode: "none" }
+                : { mode: "needs_attention" };
+            case "most_common_issue": {
+              const issue =
+                typeof issueSeed === "string" ? issueSeed.trim() : "";
+              if (
+                !issue.length ||
+                issue === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL
+              ) {
+                return prev;
+              }
+              const prevIssue =
+                prev.mode === "top_issue"
+                  ? (typeof prev.issue === "string" ? prev.issue.trim() : "")
+                  : "";
+              const same =
+                prev.mode === "top_issue" && prevIssue === issue;
+              return same ? { mode: "none" } : { mode: "top_issue", issue };
             }
-            const prevIssue =
-              prev.mode === "top_issue"
-                ? (typeof prev.issue === "string" ? prev.issue.trim() : "")
-                : "";
-            const same =
-              prev.mode === "top_issue" && prevIssue === issue;
-            return same ? { mode: "none" } : { mode: "top_issue", issue };
+            default:
+              return prev;
           }
-          default:
-            return prev;
-        }
-      });
+        });
+      } catch (error) {
+        logListingFixEvent({
+          action: "filter_interaction_error",
+          shop: shopDomain,
+          message: error,
+          meta: { operation: slot },
+        });
+      }
     },
-    [],
+    [shopDomain],
   );
 
   const catalogProductsForTable = useMemo(

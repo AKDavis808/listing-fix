@@ -1,5 +1,10 @@
 import type { ActionFunctionArgs } from "react-router";
 
+import {
+  endTimer,
+  logListingFixEvent,
+  startTimer,
+} from "../features/listingFix/telemetry";
 import { authenticate } from "../shopify.server";
 import { auditProduct } from "../services/productAudit.server";
 import { fetchProductById } from "../services/listingProducts.server";
@@ -26,80 +31,118 @@ function extractAiRequestToken(formData: FormData): string {
   return typeof raw === "string" ? raw : "";
 }
 
+function failAi(
+  shop: string,
+  timer: ReturnType<typeof startTimer>,
+  error: unknown,
+  productId?: string,
+  requestToken = "",
+): AiSuggestionsActionData {
+  const message =
+    typeof error === "string"
+      ? error
+      : error != null && typeof (error as { message?: unknown }).message === "string"
+        ? String((error as { message: string }).message)
+        : "AI request failed.";
+
+  logListingFixEvent({
+    action: "ai_failure",
+    shop,
+    productId,
+    durationMs: endTimer(timer),
+    message,
+  });
+
+  return { ok: false, error: message, productId, requestToken };
+}
+
 export const action = async ({
   request,
 }: ActionFunctionArgs): Promise<AiSuggestionsActionData> => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
+  const timer = startTimer("ai-suggestions");
 
   let formData: FormData;
   try {
     formData = await request.formData();
-  } catch {
-    return { ok: false, error: "Invalid request body.", requestToken: "" };
+  } catch (error) {
+    return failAi(shop, timer, error);
   }
 
   const requestToken = extractAiRequestToken(formData);
 
   if (formData.get("intent") !== "ai-suggestions") {
-    return {
-      ok: false,
-      error: "Unsupported action intent.",
-      requestToken,
-    };
+    return failAi(shop, timer, "Unsupported action intent.", undefined, requestToken);
   }
 
   const productIdRaw = formData.get("productId");
   const productId =
     typeof productIdRaw === "string" ? productIdRaw.trim() : "";
   if (!productId) {
-    return {
-      ok: false,
-      error: "A product ID is required.",
-      requestToken,
-    };
+    return failAi(shop, timer, "A product ID is required.", undefined, requestToken);
   }
 
-  const snapshot = await fetchProductById(admin, productId);
-  if (!snapshot) {
-    return {
-      ok: false,
-      error: "That product could not be loaded — it may no longer exist.",
-      productId,
-      requestToken,
-    };
-  }
-
-  const audit = auditProduct({
-    title: snapshot.title,
-    descriptionHtml: snapshot.descriptionHtml,
-    productType: snapshot.productType,
-    tags: snapshot.tags,
-    variantsCount: snapshot.variantsCount,
+  logListingFixEvent({
+    action: "ai_start",
+    shop,
+    productId,
   });
 
-  const recommendations = recommendationsForIssues(audit.issues);
+  try {
+    const snapshot = await fetchProductById(admin, productId);
+    if (!snapshot) {
+      return failAi(
+        shop,
+        timer,
+        "That product could not be loaded — it may no longer exist.",
+        productId,
+        requestToken,
+      );
+    }
 
-  const generated = await generateProductListingSuggestions({
-    snapshot,
-    issues: audit.issues,
-    recommendations,
-  });
+    const audit = auditProduct({
+      title: snapshot.title,
+      descriptionHtml: snapshot.descriptionHtml,
+      productType: snapshot.productType,
+      tags: snapshot.tags,
+      variantsCount: snapshot.variantsCount,
+    });
 
-  if (!generated.ok) {
-    return {
-      ok: false,
-      error: generated.error,
+    const recommendations = recommendationsForIssues(audit.issues);
+
+    const generated = await generateProductListingSuggestions({
+      snapshot,
+      issues: audit.issues,
+      recommendations,
+    });
+
+    if (!generated.ok) {
+      return failAi(
+        shop,
+        timer,
+        generated.error,
+        snapshot.id,
+        requestToken,
+      );
+    }
+
+    logListingFixEvent({
+      action: "ai_success",
+      shop,
       productId: snapshot.id,
+      durationMs: endTimer(timer),
+    });
+
+    return {
+      ok: true,
+      productId: snapshot.id,
+      suggestions: generated.value,
       requestToken,
     };
+  } catch (error) {
+    return failAi(shop, timer, error, productId, requestToken);
   }
-
-  return {
-    ok: true,
-    productId: snapshot.id,
-    suggestions: generated.value,
-    requestToken,
-  };
 };
 
 /** POST-only companion route; accidental GET renders nothing inline. */
