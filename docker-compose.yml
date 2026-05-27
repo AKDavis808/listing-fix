@@ -1,0 +1,23 @@
+# Optional local PostgreSQL for `shopify app dev` sessions (ListingFix requires DATABASE_URL).
+# Start: docker compose up -d
+# Stop:  docker compose down
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: listingfix
+      POSTGRES_PASSWORD: listingfix_dev_local
+      POSTGRES_DB: listingfix
+    ports:
+      - "5432:5432"
+    volumes:
+      - listingfix_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U listingfix -d listingfix"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  listingfix_postgres_data:

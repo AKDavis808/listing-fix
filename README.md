@@ -24,6 +24,24 @@ shopify app init --template=https://github.com/Shopify/shopify-app-template-reac
 
 ### Local Development
 
+Sessions are persisted with **PostgreSQL** via Prisma. Set **`DATABASE_URL`** before `shopify app dev` or any Prisma command (see [.env.example](.env.example)).
+
+1. Start a local Postgres (recommended — matches production):
+
+```shell
+docker compose up -d
+```
+
+2. Copy `.env.example` to `.env` and edit if needed.
+
+3. Apply migrations once (or anytime the schema changes):
+
+```shell
+npm run setup
+```
+
+4. Run the app:
+
 ```shell
 shopify app dev
 ```
@@ -77,23 +95,22 @@ For more information on the Shopify Dev MCP please read [the documentation](http
 
 ## Deployment
 
-### Application Storage
+### Session storage (PostgreSQL)
 
-This template uses [Prisma](https://www.prisma.io/) to store session data, by default using an [SQLite](https://www.sqlite.org/index.html) database.
-The database is defined as a Prisma schema in `prisma/schema.prisma`.
+ListingFix stores Shopify sessions in **PostgreSQL** ([Prisma](https://www.prisma.io/) + [`@shopify/shopify-app-session-storage-prisma`](https://www.npmjs.com/package/@shopify/shopify-app-session-storage-prisma)). The schema lives in [`prisma/schema.prisma`](prisma/schema.prisma). Provide the connection string as **`DATABASE_URL`** (never commit real credentials).
 
-This use of SQLite works in production if your app runs as a single instance.
-The database that works best for you depends on the data your app needs and how it is queried.
-Here’s a short list of databases providers that provide a free tier to get started:
+- **Production (e.g. Railway):** container-local SQLite is unreliable; Postgres keeps sessions across restarts and redeploys.
+- **`docker-start`** runs `npm run setup` (`prisma generate` + `prisma migrate deploy`) before serving, so migrations apply on boot when **`DATABASE_URL`** points at Postgres.
 
-| Database   | Type             | Hosters                                                                                                                                                                                                                                    |
-| ---------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| MySQL      | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mysql), [Planet Scale](https://planetscale.com/), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/mysql) |
-| PostgreSQL | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-postgresql), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/postgres)                                   |
-| Redis      | Key-value        | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-redis), [Amazon MemoryDB](https://aws.amazon.com/memorydb/)                                                                                                        |
-| MongoDB    | NoSQL / Document | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mongodb), [MongoDB Atlas](https://www.mongodb.com/atlas/database)                                                                                                  |
+### Railway + Postgres
 
-To use one of these, you can use a different [datasource provider](https://www.prisma.io/docs/reference/api-reference/prisma-schema-reference#datasource) in your `schema.prisma` file, or a different [SessionStorage adapter package](https://github.com/Shopify/shopify-api-js/blob/main/packages/shopify-api/docs/guides/session-storage.md).
+1. In your Railway project, click **\+ New** → **Database** → **PostgreSQL** (or choose a template that provisions Postgres).
+2. Open your **PostgreSQL** service → **Variables** tab and confirm **`DATABASE_URL`** exists (Railway generates it).
+3. Open your **app** service → **Variables** → add **`DATABASE_URL`** by referencing the Postgres service’s **`DATABASE_URL`** (**\+ New Variable** → **Reference**) so the app container receives the same value (verify both services show **`DATABASE_URL`** where needed).
+4. On the app service also set Shopify env vars (`SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `SHOPIFY_APP_URL`, plus `NODE_ENV=production`; see Shopify [deployment env vars](https://shopify.dev/docs/apps/deployment/web#set-env-vars)).
+5. **Redeploy** the app.
+
+After deploy: open **Deployments** → latest deploy → **Logs**. You should **not** see SQLite lines such as `SQLite database "dev.sqlite" at "file:dev.sqlite"`. Successful `prisma migrate deploy` followed by normal app startup confirms Postgres-backed mode (Prisma does not echo the raw URL).
 
 ### Build
 
@@ -132,13 +149,13 @@ When you reach the step for [setting up environment variables](https://shopify.d
 
 ### Database tables don't exist
 
-If you get an error like:
+If Postgres is empty or **`DATABASE_URL`** is missing, session queries can fail until migrations run:
 
-```
-The table `main.Session` does not exist in the current database.
+```shell
+npm run setup
 ```
 
-Create the database for Prisma. Run the `setup` script in `package.json` using `npm`, `yarn` or `pnpm`.
+(Railway: ensure **`DATABASE_URL`** is set on the app service so **`docker-start`** can run **`prisma migrate deploy`**.)
 
 ### Navigating/redirecting breaks an embedded app
 

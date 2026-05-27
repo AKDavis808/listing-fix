@@ -2,12 +2,11 @@
 
 client_id = "eb3e7bb9b288288370fd990fcacf126e"
 name = "ListingFix"
-application_url = "https://window-msgstr-found-institutional.trycloudflare.com"
+application_url = "https://listing-fix-production.up.railway.app"
 embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-04"
@@ -27,4 +26,7 @@ optional_scopes = []
 use_legacy_install_flow = false
 
 [auth]
-redirect_urls = []
+redirect_urls = [
+  "https://listing-fix-production.up.railway.app/auth/callback",
+  "https://listing-fix-production.up.railway.app/auth/shopify/callback"
+]

@@ -160,8 +160,9 @@ export const action = async ({
   return { ok: true, audited };
 };
 
-function statusTone(status: string): BadgeProps["tone"] | undefined {
-  const normalized = status
+/** Safe Polaris tone for product status badges (handles missing/non-string GraphQL payloads). */
+function statusTone(status: string | null | undefined): BadgeProps["tone"] | undefined {
+  const normalized = String(status ?? "")
     .toUpperCase()
     .replace(/\s+/g, "_")
     .replace(/\./g, "_");
@@ -184,10 +185,63 @@ function scoreTone(score: number): Exclude<BadgeProps["tone"], undefined> {
 }
 
 /** In-memory sort: scanned rows first (worst score first); unscanned preserves catalog order. */
+/** Safe numeric audit score for sorting/filtering when state is incomplete. */
+function safeAuditScore(audit: StoredProductAudit | undefined | null): number {
+  if (
+    audit == null ||
+    typeof audit.score !== "number" ||
+    !Number.isFinite(audit.score)
+  ) {
+    return 0;
+  }
+  return audit.score;
+}
+
+function coerceStoredAuditFromRow(row: AuditedCatalogProductRow): StoredProductAudit {
+  const issues = Array.isArray(row.issues)
+    ? row.issues.filter((i): i is string => typeof i === "string")
+    : [];
+  const recommendations = Array.isArray(row.recommendations)
+    ? row.recommendations.filter(
+        (r): r is IssueRecommendationPair =>
+          r != null &&
+          typeof r === "object" &&
+          typeof (r as IssueRecommendationPair).issue === "string" &&
+          typeof (r as IssueRecommendationPair).recommendation === "string",
+      )
+    : [];
+
+  let score =
+    typeof row.score === "number" && Number.isFinite(row.score)
+      ? row.score
+      : 0;
+
+  score = Math.max(0, Math.min(100, score));
+
+  const topIssue =
+    typeof row.topIssue === "string" ? row.topIssue.trim() : "";
+
+  return {
+    score,
+    issues,
+    topIssue,
+    recommendations,
+  };
+}
+
+/** Issue list stored on audits (arrays only; tolerant of malformed responses). */
+function safeIssuesList(audit: StoredProductAudit | undefined | null): string[] {
+  return Array.isArray(audit?.issues)
+    ? audit.issues.filter((i): i is string => typeof i === "string")
+    : [];
+}
+
 function sortProductsForTable(
   products: ClientCatalogProductRow[],
   auditMap: Record<string, StoredProductAudit>,
 ): ClientCatalogProductRow[] {
+  if (!products.length) return [];
+
   const copy = [...products];
   copy.sort((a, b) => {
     const au = auditMap[a.id];
@@ -197,11 +251,17 @@ function sortProductsForTable(
     if (aDone !== bDone) {
       return aDone ? -1 : 1;
     }
-    if (aDone && bDone && au && bu && au.score !== bu.score) {
-      return au.score - bu.score;
-    }
-    if (aDone && bDone && a.title !== b.title) {
-      return a.title.localeCompare(b.title);
+    if (aDone && bDone && au && bu) {
+      const as = safeAuditScore(au);
+      const bs = safeAuditScore(bu);
+      if (as !== bs) {
+        return as - bs;
+      }
+      const ta = typeof a.title === "string" ? a.title : "";
+      const tb = typeof b.title === "string" ? b.title : "";
+      if (ta !== tb) {
+        return ta.localeCompare(tb);
+      }
     }
     return products.indexOf(a) - products.indexOf(b);
   });
@@ -246,10 +306,13 @@ function catalogFilterBadgeLabel(filter: DashboardCatalogFilter): string {
     case "needs_attention":
       return "Needs attention (<80)";
     case "top_issue": {
+      const issueText =
+        typeof filter.issue === "string" ? filter.issue.trim() : "";
+      if (!issueText.length) return "Most common issue";
       const short =
-        filter.issue.length > 64
-          ? `${filter.issue.slice(0, 63)}…`
-          : filter.issue;
+        issueText.length > 64
+          ? `${issueText.slice(0, 63)}…`
+          : issueText;
       return short;
     }
     default:
@@ -273,16 +336,20 @@ function filterCatalogRowsByDashboard(
     switch (filter.mode) {
       case "scanned":
         return a != null;
-      case "needs_attention":
-        return a != null && a.score < 80;
-      case "top_issue":
-        return (
-          a != null &&
-          a.issues.some(
-            (issue) =>
-              typeof issue === "string" && issue.trim() === filter.issue,
-          )
+      case "needs_attention": {
+        if (a == null) return false;
+        const s = safeAuditScore(a);
+        return s < 80;
+      }
+      case "top_issue": {
+        if (a == null) return false;
+        const target =
+          typeof filter.issue === "string" ? filter.issue.trim() : "";
+        if (!target.length) return false;
+        return safeIssuesList(a).some(
+          (issue) => issue.trim() === target,
         );
+      }
       default:
         return true;
     }
@@ -356,13 +423,17 @@ function computeDashboardStats(
   const issueFreq = new Map<string, number>();
 
   for (const p of audited) {
-    const a = auditMap[p.id]!;
-    sumScores += a.score;
-    if (a.score < 80) {
+    const a = auditMap[p.id];
+    if (a == null) continue;
+    const score = safeAuditScore(a);
+    sumScores += score;
+    if (score < 80) {
       needsAttention += 1;
     }
-    for (const issue of a.issues) {
-      issueFreq.set(issue, (issueFreq.get(issue) ?? 0) + 1);
+    for (const issue of safeIssuesList(a)) {
+      const key = issue.trim();
+      if (!key.length) continue;
+      issueFreq.set(key, (issueFreq.get(key) ?? 0) + 1);
     }
   }
 
@@ -443,12 +514,8 @@ export default function ListingFixHomePage() {
 
     const next: Record<string, StoredProductAudit> = {};
     for (const row of fetcher.data.audited) {
-      next[row.id] = {
-        score: row.score,
-        issues: row.issues,
-        topIssue: row.topIssue,
-        recommendations: row.recommendations,
-      };
+      if (!row?.id || typeof row.id !== "string") continue;
+      next[row.id] = coerceStoredAuditFromRow(row);
     }
     setAuditByProductId(next);
   }, [fetcher.state, fetcher.data]);
@@ -697,6 +764,11 @@ export default function ListingFixHomePage() {
     [auditByProductId, data],
   );
 
+  const topIssueLabel =
+    typeof dashboardStats.topIssue === "string"
+      ? dashboardStats.topIssue.trim()
+      : "";
+
   const orderedProducts = useMemo(
     () =>
       data.ok
@@ -733,16 +805,20 @@ export default function ListingFixHomePage() {
               ? { mode: "none" }
               : { mode: "needs_attention" };
           case "most_common_issue": {
-            const issue = issueSeed?.trim() ?? "";
+            const issue =
+              typeof issueSeed === "string" ? issueSeed.trim() : "";
             if (
               !issue.length ||
               issue === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL
             ) {
               return prev;
             }
+            const prevIssue =
+              prev.mode === "top_issue"
+                ? (typeof prev.issue === "string" ? prev.issue.trim() : "")
+                : "";
             const same =
-              prev.mode === "top_issue" &&
-              prev.issue.trim() === issue;
+              prev.mode === "top_issue" && prevIssue === issue;
             return same ? { mode: "none" } : { mode: "top_issue", issue };
           }
           default:
@@ -769,28 +845,40 @@ export default function ListingFixHomePage() {
     return catalogProductsForTable.map((product) => {
       const audit = auditByProductId[product.id];
       const displayStatus = product.status
-        ? product.status.toLowerCase().replace(/_/g, " ")
+        ? String(product.status).toLowerCase().replace(/_/g, " ")
         : "unknown";
+
+      const auditedScore =
+        audit != null ? safeAuditScore(audit) : null;
 
       const scoreCell =
         audit != null ? (
-          <Badge tone={scoreTone(audit.score)}>{String(audit.score)}</Badge>
+          <Badge tone={scoreTone(auditedScore)}>
+            {String(auditedScore)}
+          </Badge>
         ) : (
           <Badge tone="read-only">Not scanned</Badge>
         );
 
+      const issueCount =
+        audit != null ? safeIssuesList(audit).length : 0;
+
       const issuesCell =
         audit != null ? (
-          String(audit.issues.length)
+          String(issueCount)
         ) : (
           <Text as="span" variant="bodyMd" tone="subdued">
             —
           </Text>
         );
 
+      const tt =
+        audit != null && typeof audit.topIssue === "string"
+          ? audit.topIssue.trim()
+          : "";
       const topIssueCell =
         audit != null ? (
-          audit.topIssue.trim().length > 0 ? (
+          tt.length > 0 ? (
             audit.topIssue
           ) : (
             <Text as="span" variant="bodyMd" tone="subdued">
@@ -814,7 +902,10 @@ export default function ListingFixHomePage() {
           {displayStatus}
         </Badge>,
         String(
-          product.tags.filter((t) => typeof t === "string" && t.trim()).length,
+          (Array.isArray(product.tags)
+            ? product.tags
+            : []
+          ).filter((t) => typeof t === "string" && t.trim()).length,
         ),
         String(product.variantsCount),
         <Button
@@ -852,8 +943,8 @@ export default function ListingFixHomePage() {
   const commonIssueMetricDisabled =
     !data.ok ||
     dashboardStats.scannedCount === 0 ||
-    dashboardStats.topIssue.trim().length === 0 ||
-    dashboardStats.topIssue === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL;
+    !topIssueLabel.length ||
+    topIssueLabel === DASHBOARD_AGGREGATE_NO_ISSUE_LABEL;
 
   const dashboardFilterActive = dashboardFilter.mode !== "none";
 
@@ -973,17 +1064,18 @@ export default function ListingFixHomePage() {
                     </DashboardInteractiveMetricTile>
 
                     <DashboardInteractiveMetricTile
-                      accessibilityHint={`Toggle to isolate products flagged with "${dashboardStats.topIssue}".`}
+                      accessibilityHint={`Toggle to isolate products flagged with "${topIssueLabel || "common issues"}".`}
                       label="Most common issue"
                       selected={
                         dashboardFilter.mode === "top_issue" &&
-                        dashboardFilter.issue === dashboardStats.topIssue.trim()
+                        typeof dashboardFilter.issue === "string" &&
+                        dashboardFilter.issue.trim() === topIssueLabel
                       }
                       disabled={commonIssueMetricDisabled}
                       onToggle={() =>
                         toggleDashboardCatalogSlice(
                           "most_common_issue",
-                          dashboardStats.topIssue,
+                          topIssueLabel,
                         )
                       }
                     >
@@ -1117,9 +1209,9 @@ export default function ListingFixHomePage() {
                 <Text as="h3" variant="headingSm">
                   Issues detected
                 </Text>
-                {detailAudit.issues.length ? (
+                {safeIssuesList(detailAudit).length ? (
                   <List type="bullet" gap="loose">
-                    {detailAudit.issues.map((issue) => (
+                    {safeIssuesList(detailAudit).map((issue) => (
                       <List.Item key={issue}>{issue}</List.Item>
                     ))}
                   </List>
@@ -1136,7 +1228,8 @@ export default function ListingFixHomePage() {
                 <Text as="h3" variant="headingSm">
                   What to fix first
                 </Text>
-                {detailAudit.recommendations.length ? (
+                {Array.isArray(detailAudit.recommendations) &&
+                detailAudit.recommendations.length ? (
                   <BlockStack gap="300">
                     {detailAudit.recommendations.map(({ issue, recommendation }) => (
                       <Card key={`${detailProduct.id}-${issue}`}>
@@ -1498,13 +1591,14 @@ function AiSuggestionPreviewBlock({
 }
 
 function InlineScoreRow({ audit }: { audit: StoredProductAudit }) {
+  const s = safeAuditScore(audit);
   return (
     <BlockStack gap="100">
       <Text variant="bodyMd" as="p" tone="subdued">
         Current audit score
       </Text>
-      <Badge tone={scoreTone(audit.score)} size="large">
-        {audit.score}/100
+      <Badge tone={scoreTone(s)} size="large">
+        {s}/100
       </Badge>
     </BlockStack>
   );
