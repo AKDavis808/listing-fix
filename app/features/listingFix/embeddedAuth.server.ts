@@ -16,6 +16,9 @@ type AuthLogMeta = Record<string, string | number | boolean | null | undefined>;
 const LOGIN_PATH = "/auth/login";
 const SESSION_TOKEN_PATH = "/auth/session-token";
 const REAUTH_URL_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
+const BOUNCE_REQUEST_HEADER = "X-Shopify-Bounce";
+const APP_BRIDGE_URL =
+  "https://cdn.shopify.com/shopifycloud/app-bridge.js";
 
 function extractRequestContext(request: Request) {
   const url = new URL(request.url);
@@ -99,6 +102,151 @@ function isUnauthorizedResponse(error: unknown): error is Response {
   return error instanceof Response && error.status === 401;
 }
 
+function isEmbeddedSessionTokenFetch(request: Request): boolean {
+  return (
+    Boolean(request.headers.get("authorization")) ||
+    request.headers.has(BOUNCE_REQUEST_HEADER)
+  );
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export function renderSessionTokenBouncePage(request: Request): never {
+  const url = new URL(request.url);
+  const shop = url.searchParams.get("shop");
+  const shopifyReload = url.searchParams.get("shopify-reload");
+  const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
+
+  if (!apiKey) {
+    logEmbeddedAuthEvent("session_missing", request, {
+      reason: "missing_api_key",
+      route: "auth.session-token",
+    });
+  }
+
+  if (!shopifyReload) {
+    logEmbeddedAuthEvent("session_missing", request, {
+      reason: "missing_shopify_reload",
+      route: "auth.session-token",
+    });
+  }
+
+  logEmbeddedAuthEvent("auth_redirect", request, {
+    target: SESSION_TOKEN_PATH,
+    source: "render_session_token_bounce",
+    preservedShop: Boolean(shop),
+    preservedHost: Boolean(url.searchParams.get("host")),
+    hasShopifyReload: Boolean(shopifyReload),
+  });
+
+  const responseHeaders = new Headers({
+    "content-type": "text/html;charset=utf-8",
+    "cache-control": "no-store",
+  });
+
+  if (shop) {
+    responseHeaders.set(
+      "Content-Security-Policy",
+      `frame-ancestors https://${shop} https://admin.shopify.com https://*.spin.dev https://admin.myshopify.io https://admin.shop.dev;`,
+    );
+    responseHeaders.set(
+      "Link",
+      `<https://cdn.shopify.com>; rel="preconnect", <${APP_BRIDGE_URL}>; rel="preload"; as="script"`,
+    );
+  }
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ListingFix session token</title>
+  </head>
+  <body>
+    <script>
+      (function () {
+        function logError(reason) {
+          console.log("session_token_error", reason);
+        }
+
+        console.log("session_token_page_loaded", {
+          href: location.href,
+          shopifyReload: new URLSearchParams(location.search).get("shopify-reload"),
+        });
+
+        window.addEventListener("error", function (event) {
+          logError(event.message || "window_error");
+        });
+        window.addEventListener("unhandledrejection", function (event) {
+          logError(String(event.reason));
+        });
+
+        function installFetchLogging() {
+          var originalFetch = window.fetch;
+          if (!originalFetch) return;
+
+          window.fetch = function (input, init) {
+            var requestInit = init || {};
+            var headers = requestInit.headers;
+            var headerLookup = function (name) {
+              if (!headers) return null;
+              if (typeof headers.get === "function") return headers.get(name);
+              return headers[name] || headers[name.toLowerCase()] || null;
+            };
+
+            if (headerLookup("Authorization")) {
+              console.log("session_token_requested");
+            }
+            if (headerLookup("X-Shopify-Bounce")) {
+              console.log("session_token_reload_start", String(input));
+            }
+
+            return originalFetch.call(this, input, init).then(
+              function (response) {
+                if (headerLookup("X-Shopify-Bounce")) {
+                  console.log("session_token_received", {
+                    status: response.status,
+                    ok: response.ok,
+                  });
+                }
+                return response;
+              },
+              function (error) {
+                logError(String(error));
+                throw error;
+              },
+            );
+          };
+        }
+
+        installFetchLogging();
+
+        var appBridgeScript = document.getElementById("listingfix-app-bridge");
+        if (appBridgeScript) {
+          appBridgeScript.addEventListener("load", installFetchLogging);
+          appBridgeScript.addEventListener("error", function () {
+            logError("app_bridge_script_failed");
+          });
+        }
+      })();
+    </script>
+    <script
+      id="listingfix-app-bridge"
+      data-api-key="${escapeHtmlAttribute(apiKey)}"
+      src="${APP_BRIDGE_URL}"
+    ></script>
+  </body>
+</html>`;
+
+  throw new Response(html, { headers: responseHeaders });
+}
+
 export function redirectToSessionTokenBounce(request: Request): never {
   const url = new URL(request.url);
   const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
@@ -173,7 +321,14 @@ export function handleEmbeddedUnauthorized(
     throw redirect(target.toString());
   }
 
-  if (ctx.embedded && ctx.shop && ctx.host) {
+  // App Bridge bounce fetches /app with Authorization + X-Shopify-Bounce.
+  // Redirecting those 401s back to /auth/session-token breaks document.write reload.
+  if (
+    ctx.embedded &&
+    ctx.shop &&
+    ctx.host &&
+    !isEmbeddedSessionTokenFetch(request)
+  ) {
     redirectToSessionTokenBounce(request);
   }
 
