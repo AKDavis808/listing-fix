@@ -19,6 +19,7 @@ import {
   logAuthRouteWiringDiagnostic,
   logStartupSessionDiagnostics,
 } from "./features/listingFix/oauthSessionDiagnostics.server";
+import { logStartupUrlConfigDiagnostic } from "./features/listingFix/oauthCallbackDiagnostics.server";
 import { InstrumentedPrismaSessionStorage } from "./features/listingFix/prismaSessionStorage.server";
 import { handleOAuthAuthRoute } from "./features/listingFix/shopifyOAuthRoute.server";
 import { verifyPrismaSessionPersisted } from "./features/listingFix/sessionPersistence.server";
@@ -57,6 +58,7 @@ logAuthDiagnosticOnce("shopify_auth_config", () => {
 
 void logStartupSessionDiagnostics();
 logAuthRouteWiringDiagnostic(appUrl, distribution);
+logStartupUrlConfigDiagnostic(appUrl, AUTH_CALLBACK_PATH, apiKey, scopes);
 
 export async function runListingFixAfterAuth(session: Session): Promise<void> {
   logAfterAuthStart(session);

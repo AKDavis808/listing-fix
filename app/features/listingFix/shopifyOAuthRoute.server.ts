@@ -2,11 +2,17 @@ import { redirect } from "react-router";
 
 import {
   logAuthCallbackCompleted,
-  logAuthCallbackEntered,
   logAuthRouteEntered,
   logOAuthCallbackError,
   logOAuthRouteEntered,
 } from "./oauthSessionDiagnostics.server";
+import {
+  logOAuthBeginResponse,
+  logOAuthCallbackEnteredDetailed,
+  logOAuthCallbackQuery,
+  logOAuthCallbackValidationFailure,
+  logOAuthCallbackValidationSuccess,
+} from "./oauthCallbackDiagnostics.server";
 import { listingFixShopifyApi } from "./shopifyApi.server";
 import { getOfflineSessionId } from "./sessionPersistence.server";
 
@@ -32,6 +38,10 @@ function isAuthRootPath(pathname: string): boolean {
   return pathname === "/auth" || pathname.endsWith("/auth");
 }
 
+function buildRedirectUri(appUrl: string, callbackPath: string): string {
+  return `${appUrl.replace(/\/$/, "")}${callbackPath}`;
+}
+
 async function buildPostOAuthRedirectUrl(
   request: Request,
   shop: string,
@@ -46,6 +56,84 @@ async function buildPostOAuthRedirectUrl(
   return `${appUrl}/app?shop=${encodeURIComponent(shop)}&embedded=1`;
 }
 
+export async function handleOAuthCallbackRoute(
+  request: Request,
+  deps: OAuthRouteDeps,
+  route: string,
+): Promise<Response> {
+  logOAuthCallbackQuery(request);
+  logOAuthCallbackEnteredDetailed(
+    new URL(request.url).searchParams.get("shop"),
+    route,
+  );
+
+  const url = new URL(request.url);
+  const shop = url.searchParams.get("shop");
+  const code = url.searchParams.get("code");
+
+  if (!code) {
+    logOAuthCallbackValidationFailure(
+      shop,
+      new Error("OAuth callback missing code parameter"),
+    );
+
+    return new Response("OAuth callback missing code parameter", {
+      status: 400,
+    });
+  }
+
+  try {
+    logListingFixEventBeforeCallback(shop);
+
+    const { session, headers } = await listingFixShopifyApi.auth.callback({
+      rawRequest: request,
+      expiring: deps.expiringOfflineAccessTokens,
+    });
+
+    logOAuthCallbackValidationSuccess(session.shop);
+
+    await deps.sessionStorage.storeSession(session);
+    await deps.runAfterAuth(session);
+
+    logAuthCallbackCompleted(session.shop, {
+      sessionId: session.id,
+      expectedOfflineSessionId: getOfflineSessionId(session.shop),
+      offlineIdMatches: session.id === getOfflineSessionId(session.shop),
+      isOnline: session.isOnline,
+      accessTokenPresent: Boolean(session.accessToken),
+      route,
+    });
+
+    const redirectUrl = await buildPostOAuthRedirectUrl(
+      request,
+      session.shop,
+      deps.appUrl,
+    );
+
+    const responseHeaders =
+      headers instanceof Headers
+        ? headers
+        : new Headers(headers as Record<string, string>);
+
+    throw redirect(redirectUrl, { headers: responseHeaders });
+  } catch (error) {
+    if (error instanceof Response) {
+      throw error;
+    }
+
+    logOAuthCallbackValidationFailure(shop, error);
+    logOAuthCallbackError(shop, error);
+    throw error;
+  }
+}
+
+function logListingFixEventBeforeCallback(shop: string | null): void {
+  logAuthRouteEntered("/auth/callback", shop, {
+    event: "oauth_callback_execute_start",
+    route: "shopify.auth.callback",
+  });
+}
+
 export async function handleOAuthAuthRoute(
   request: Request,
   deps: OAuthRouteDeps,
@@ -55,46 +143,8 @@ export async function handleOAuthAuthRoute(
   const shop = url.searchParams.get("shop");
   const isCallback = isOAuthCallbackPath(pathname);
 
-  if (isCallback && url.searchParams.has("code")) {
-    logAuthCallbackEntered(shop, "auth.callback");
-
-    try {
-      const { session, headers } = await listingFixShopifyApi.auth.callback({
-        rawRequest: request,
-        expiring: deps.expiringOfflineAccessTokens,
-      });
-
-      await deps.sessionStorage.storeSession(session);
-      await deps.runAfterAuth(session);
-
-      logAuthCallbackCompleted(shop, {
-        sessionId: session.id,
-        expectedOfflineSessionId: getOfflineSessionId(session.shop),
-        offlineIdMatches: session.id === getOfflineSessionId(session.shop),
-        isOnline: session.isOnline,
-        accessTokenPresent: Boolean(session.accessToken),
-      });
-
-      const redirectUrl = await buildPostOAuthRedirectUrl(
-        request,
-        session.shop,
-        deps.appUrl,
-      );
-
-      const responseHeaders =
-        headers instanceof Headers
-          ? headers
-          : new Headers(headers as Record<string, string>);
-
-      throw redirect(redirectUrl, { headers: responseHeaders });
-    } catch (error) {
-      if (error instanceof Response) {
-        throw error;
-      }
-
-      logOAuthCallbackError(shop, error);
-      throw error;
-    }
+  if (isCallback) {
+    return handleOAuthCallbackRoute(request, deps, "shopifyOAuthRoute");
   }
 
   if (isAuthRootPath(pathname) && shop && !isCallback) {
@@ -107,14 +157,29 @@ export async function handleOAuthAuthRoute(
       route: "oauth.begin",
     });
 
-    const beginResponse = await listingFixShopifyApi.auth.begin({
+    const redirectUri = buildRedirectUri(deps.appUrl, deps.authCallbackPath);
+
+    logAuthRouteEntered(pathname, shop, {
+      event: "oauth_begin_redirect_uri",
+      redirectUri,
+      callbackPath: deps.authCallbackPath,
+    });
+
+    const beginResponse = (await listingFixShopifyApi.auth.begin({
       shop,
       callbackPath: deps.authCallbackPath,
       isOnline: false,
       rawRequest: request,
-    });
+    })) as Response;
 
-    return beginResponse as Response;
+    logOAuthBeginResponse(
+      request,
+      beginResponse,
+      redirectUri,
+      deps.authCallbackPath,
+    );
+
+    return beginResponse;
   }
 
   return null;

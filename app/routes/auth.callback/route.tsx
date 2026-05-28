@@ -1,17 +1,18 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
-import { logAuthCallbackEntered } from "../../features/listingFix/oauthSessionDiagnostics.server";
 import { handleShopifyOAuthAuthRoute } from "../../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const url = new URL(request.url);
+  const response = await handleShopifyOAuthAuthRoute(request);
 
-  logAuthCallbackEntered(url.searchParams.get("shop"), "auth.callback");
+  if (response) {
+    return response;
+  }
 
-  await handleShopifyOAuthAuthRoute(request);
-
-  return new Response("OAuth callback missing code parameter", { status: 400 });
+  return new Response("OAuth callback route handler returned no response", {
+    status: 500,
+  });
 };
 
 export const headers: HeadersFunction = (headersArgs) => {
