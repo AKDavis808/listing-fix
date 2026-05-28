@@ -5,6 +5,7 @@ import {
   logAuthCallbackEntered,
   logAuthRouteEntered,
   logOAuthCallbackError,
+  logOAuthRouteEntered,
 } from "./oauthSessionDiagnostics.server";
 import { listingFixShopifyApi } from "./shopifyApi.server";
 import { getOfflineSessionId } from "./sessionPersistence.server";
@@ -55,7 +56,7 @@ export async function handleOAuthAuthRoute(
   const isCallback = isOAuthCallbackPath(pathname);
 
   if (isCallback && url.searchParams.has("code")) {
-    logAuthCallbackEntered(shop);
+    logAuthCallbackEntered(shop, "auth.callback");
 
     try {
       const { session, headers } = await listingFixShopifyApi.auth.callback({
@@ -97,6 +98,10 @@ export async function handleOAuthAuthRoute(
   }
 
   if (isAuthRootPath(pathname) && shop && !isCallback) {
+    logOAuthRouteEntered(pathname, shop, {
+      route: "auth._index",
+      event: "oauth_begin_start",
+    });
     logAuthRouteEntered(pathname, shop, {
       event: "auth_begin_entered",
       route: "oauth.begin",

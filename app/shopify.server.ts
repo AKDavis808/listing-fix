@@ -26,6 +26,9 @@ import { verifyPrismaSessionPersisted } from "./features/listingFix/sessionPersi
 export const AUTH_PATH_PREFIX = "/auth";
 export const AUTH_CALLBACK_PATH = `${AUTH_PATH_PREFIX}/callback`;
 
+/** Temporarily use Shopify default auth redirects instead of custom reconnect handling. */
+export const USE_SHOPIFY_DEFAULT_AUTH = true;
+
 const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
 const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
 const apiSecretKey = process.env.SHOPIFY_API_SECRET?.trim() ?? "";
@@ -94,12 +97,16 @@ export const authenticateAdminRaw = shopify.authenticate.admin.bind(
 );
 export const authenticate = {
   ...shopify.authenticate,
-  admin: (request: Request) =>
-    authenticateEmbeddedAdmin(request, authenticateAdminRaw),
+  admin: USE_SHOPIFY_DEFAULT_AUTH
+    ? authenticateAdminRaw
+    : (request: Request) =>
+        authenticateEmbeddedAdmin(request, authenticateAdminRaw),
 };
 export const unauthenticated = shopify.unauthenticated;
-export const login = (request: Request) =>
-  loginWithEmbeddedContext(request, shopify.login.bind(shopify));
+export const login = USE_SHOPIFY_DEFAULT_AUTH
+  ? shopify.login.bind(shopify)
+  : (request: Request) =>
+      loginWithEmbeddedContext(request, shopify.login.bind(shopify));
 export const registerWebhooks = shopify.registerWebhooks;
 export { sessionStorage };
 

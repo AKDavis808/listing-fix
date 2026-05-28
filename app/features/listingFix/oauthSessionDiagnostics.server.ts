@@ -62,13 +62,57 @@ export function logAuthRouteEntered(
   });
 }
 
-export function logAuthCallbackEntered(shop: string | null): void {
+export function logOAuthRouteEntered(
+  pathname: string,
+  shop: string | null,
+  meta?: Record<string, string | number | boolean | null | undefined>,
+): void {
+  logListingFixEvent({
+    action: "oauth_start",
+    shop,
+    meta: {
+      event: "oauth_route_entered",
+      pathname,
+      route: "auth",
+      ...meta,
+    },
+  });
+}
+
+export function logRedirectToOAuth(
+  request: Request,
+  shop: string,
+  offlineSessionId: string,
+  reason: string,
+  target: string,
+): void {
+  const url = new URL(request.url);
+
+  logListingFixEvent({
+    action: "auth_redirect",
+    shop,
+    meta: {
+      event: "redirect_to_oauth",
+      reason,
+      target,
+      fromPathname: url.pathname,
+      offlineSessionId,
+      embedded: url.searchParams.get("embedded") === "1",
+      hasHost: Boolean(url.searchParams.get("host")),
+    },
+  });
+}
+
+export function logAuthCallbackEntered(
+  shop: string | null,
+  route = "auth.callback",
+): void {
   logListingFixEvent({
     action: "oauth_start",
     shop,
     meta: {
       event: "oauth_callback_entered",
-      route: "auth.$",
+      route,
     },
   });
 }
@@ -154,13 +198,15 @@ export function logAuthRouteWiringDiagnostic(
       authPathPrefix: "/auth",
       callbackPath: "/auth/callback",
       routesMounted: [
-        "routes/auth.$ (auth/*)",
+        "routes/auth._index (/auth)",
+        "routes/auth.callback (/auth/callback)",
+        "routes/auth.$ (auth/* fallback)",
         "routes/auth.login",
         "routes/auth.session-token",
       ],
       distribution,
       appUrl,
-      note: "App Store apps also persist sessions via token exchange on bearer-authenticated /app requests; /auth/session-token 200 is bounce HTML only",
+      note: "Missing offline session must redirect to /auth (OAuth begin), not /auth/session-token bounce; session-token only after OAuth succeeds",
     },
   });
 }

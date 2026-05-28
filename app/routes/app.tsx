@@ -9,7 +9,6 @@ import { isRouteErrorResponse } from "react-router";
 
 import translations from "@shopify/polaris/locales/en.json";
 
-import { ListingFixAppAuthReconnect } from "../components/listingFix/ListingFixAppAuthReconnect";
 import { ListingFixAppNav } from "../components/listingFix/ListingFixAppNav";
 import { ListingFixEmbeddedBootstrap } from "../components/listingFix/ListingFixEmbeddedBootstrap";
 import { ListingFixErrorBoundary } from "../components/listingFix/ListingFixErrorBoundary";
@@ -18,11 +17,14 @@ import {
   ListingFixFeedbackProvider,
 } from "../components/listingFix/ListingFixFeedback";
 import { ListingFixTelemetryBootstrap } from "../components/listingFix/ListingFixTelemetryBootstrap";
+import { ensureOfflineSessionOrRedirectToOAuth } from "../features/listingFix/oauthRedirect.server";
 import { logListingFixEvent } from "../features/listingFix/telemetry";
-import { authenticate } from "../shopify.server";
+import { authenticateAdminRaw } from "../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  await ensureOfflineSessionOrRedirectToOAuth(request, "app_missing_offline_session");
+
+  const { session } = await authenticateAdminRaw(request);
 
   // eslint-disable-next-line no-undef
   return { apiKey: process.env.SHOPIFY_API_KEY || "", shop: session.shop };
@@ -64,21 +66,18 @@ export default function App() {
   );
 }
 
-function isUnauthorizedRouteError(error: unknown): boolean {
-  if (isRouteErrorResponse(error)) {
-    return error.status === 401;
-  }
-  return error instanceof Response && error.status === 401;
-}
-
 function AppRouteErrorBoundary() {
   const error = useRouteError();
 
   useEffect(() => {
-    if (isUnauthorizedRouteError(error)) {
+    if (error instanceof Response || isRouteErrorResponse(error)) {
       logListingFixEvent({
         action: "auth_401_caught",
-        meta: { boundary: "app_route" },
+        meta: {
+          boundary: "app_route",
+          status: error instanceof Response ? error.status : error.status,
+          note: "shopify_default_auth_error_boundary",
+        },
       });
       return;
     }
@@ -89,10 +88,6 @@ function AppRouteErrorBoundary() {
       meta: { boundary: "app_route" },
     });
   }, [error]);
-
-  if (isUnauthorizedRouteError(error)) {
-    return <ListingFixAppAuthReconnect />;
-  }
 
   if (error instanceof Response) {
     return boundary.error(error);

@@ -2,8 +2,9 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import { logAuthRouteEntered } from "../../features/listingFix/oauthSessionDiagnostics.server";
+import { ensureOfflineSessionOrRedirectToOAuth } from "../../features/listingFix/oauthRedirect.server";
 import { logListingFixEvent } from "../../features/listingFix/telemetry";
-import { authenticate } from "../../shopify.server";
+import { authenticateAdminRaw } from "../../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
@@ -13,9 +14,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     route: "auth.session-token",
     hasAuthorizationHeader,
     note: hasAuthorizationHeader
-      ? "bearer_present_may_still_render_bounce_page"
-      : "bounce_page_only_200_not_session_saved",
+      ? "post_oauth_bounce_attempt"
+      : "pre_oauth_bounce_blocked",
   });
+
+  await ensureOfflineSessionOrRedirectToOAuth(
+    request,
+    "session_token_requires_offline_session",
+  );
 
   if (!hasAuthorizationHeader) {
     logListingFixEvent({
@@ -23,12 +29,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       shop: url.searchParams.get("shop"),
       meta: {
         event: "session_token_bounce_page",
-        note: "200 on /auth/session-token is App Bridge bounce HTML, not prisma_session_saved",
+        note: "offline session exists; App Bridge bounce HTML is expected here",
       },
     });
   }
 
-  await authenticate.admin(request);
+  await authenticateAdminRaw(request);
   return null;
 };
 

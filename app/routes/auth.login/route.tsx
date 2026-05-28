@@ -2,7 +2,7 @@ import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, useActionData, useLoaderData } from "react-router";
+import { Form, redirect, useActionData, useLoaderData } from "react-router";
 
 import translations from "@shopify/polaris/locales/en.json";
 
@@ -13,7 +13,9 @@ import {
   logEmbeddedAuthEvent,
 } from "../../features/listingFix/embeddedAuth.server";
 import { logAuthRouteEntered } from "../../features/listingFix/oauthSessionDiagnostics.server";
-import { logListingFixEvent } from "../../features/listingFix/telemetry";
+import {
+  ensureOfflineSessionOrRedirectToOAuth,
+} from "../../features/listingFix/oauthRedirect.server";
 import { login } from "../../shopify.server";
 import { loginErrorMessage } from "./error.server";
 
@@ -43,20 +45,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (hasShop && shop) {
     logEmbeddedAuthEvent("oauth_start", request, {
       route: "auth.login",
-      forceOAuthRedirect: true,
+      redirectTarget: "/auth",
       embedded: isEmbedded,
     });
 
-    const errors = loginErrorMessage(await login(request));
+    await ensureOfflineSessionOrRedirectToOAuth(
+      request,
+      "auth_login_missing_offline_session",
+    );
 
-    return {
-      errors,
-      isEmbedded,
-      hasShop,
-      // eslint-disable-next-line no-undef
-      apiKey: process.env.SHOPIFY_API_KEY || "",
-      oauthInstallUrl: null as string | null,
-    };
+    throw redirect(`/app?${url.searchParams.toString()}`);
   }
 
   const errors = loginErrorMessage(await login(request));
