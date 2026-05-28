@@ -70,6 +70,10 @@ function logTokenExchangeDiagnostics(
         token_exchange_token_shape_dotCount: shape.dotCount,
         token_exchange_token_shape_length: shape.length,
         token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
+        token_exchange_token_shape_jwtSectionCount: shape.jwtSectionCount,
+        token_exchange_token_prefix12: shape.tokenPrefix12,
+        token_exchange_token_typeof: shape.tokenTypeof,
+        token_exchange_token_includesWhitespace: shape.includesWhitespace,
         token_exchange_token_shape_startsWithBearer: shape.startsWithBearer,
         ...extra,
       },
@@ -133,14 +137,17 @@ export async function bootstrapOfflineSessionIfNeeded(
     logSessionPersistenceEvent("token_exchange_start", shop, {
       offlineSessionId,
       token_exchange_token_source: source,
+      token_exchange_token_shape_dotCount: shape.dotCount,
       token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
+      token_exchange_token_shape_jwtSectionCount: shape.jwtSectionCount,
       token_exchange_token_shape_length: shape.length,
     });
   });
 
   try {
+    const normalizedToken = token;
     const { session } = await api.auth.tokenExchange({
-      sessionToken: token,
+      sessionToken: normalizedToken,
       shop,
       requestedTokenType: RequestedTokenType.OfflineAccessToken,
       expiring: true,
@@ -152,6 +159,7 @@ export async function bootstrapOfflineSessionIfNeeded(
       sessionId: session.id,
       stored,
       token_exchange_token_source: source,
+      token_exchange_token_shape_dotCount: shape.dotCount,
       token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
       token_exchange_token_shape_length: shape.length,
     });
@@ -162,7 +170,9 @@ export async function bootstrapOfflineSessionIfNeeded(
       logSessionPersistenceEvent("token_exchange_failure", shop, {
         offlineSessionId,
         token_exchange_token_source: source,
+        token_exchange_token_shape_dotCount: shape.dotCount,
         token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
+        token_exchange_token_shape_jwtSectionCount: shape.jwtSectionCount,
         token_exchange_token_shape_length: shape.length,
         message: sanitizeErrorMessage(error),
       });

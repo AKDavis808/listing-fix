@@ -10,46 +10,64 @@ export type SessionTokenShape = {
   length: number;
   startsWithBearer: boolean;
   hasThreeJwtSections: boolean;
+  jwtSectionCount: number;
+  tokenPrefix12: string;
+  tokenTypeof: string;
+  includesWhitespace: boolean;
 };
+
+export function normalizeSessionToken(
+  raw: string | null | undefined,
+): string | null {
+  if (raw == null) return null;
+
+  let token = String(raw).trim();
+  if (!token) return null;
+
+  if (/^Bearer\s+/i.test(token)) {
+    token = token.replace(/^Bearer\s+/i, "").trim();
+  }
+
+  return token || null;
+}
 
 export function describeSessionTokenShape(
   token: string | null | undefined,
 ): SessionTokenShape {
-  const value = token?.trim() ?? "";
-  const dotCount = value ? value.split(".").length - 1 : 0;
+  const value = normalizeSessionToken(token) ?? "";
+  const jwtSections = value ? value.split(".") : [];
+  const dotCount = jwtSections.length > 0 ? jwtSections.length - 1 : 0;
+  const hasThreeJwtSections = jwtSections.length === 3;
+
   return {
     dotCount,
     length: value.length,
-    startsWithBearer: /^Bearer\s+/i.test(value),
-    hasThreeJwtSections: dotCount === 3,
+    startsWithBearer: /^Bearer\s+/i.test(String(token ?? "").trim()),
+    hasThreeJwtSections,
+    jwtSectionCount: jwtSections.length,
+    tokenPrefix12: value.slice(0, 12),
+    tokenTypeof: typeof token,
+    includesWhitespace: /\s/.test(value),
   };
 }
 
 export function isValidSessionTokenShape(token: string | null | undefined): boolean {
-  const value = token?.trim();
+  const value = normalizeSessionToken(token);
   if (!value) return false;
-  if (/^Bearer\s+/i.test(value)) return false;
   if (value.length < 20) return false;
-  return value.split(".").length === 3;
+
+  const jwtSections = value.split(".");
+  return jwtSections.length === 3;
 }
 
 export function extractBearerSessionToken(request: Request): string | null {
-  const header = request.headers.get("authorization")?.trim();
-  if (!header || !/^Bearer\s+/i.test(header)) {
-    return null;
-  }
-
-  const token = header.replace(/^Bearer\s+/i, "").trim();
-  if (!token || /^Bearer\s+/i.test(token)) {
-    return null;
-  }
-
-  return token;
+  return normalizeSessionToken(request.headers.get("authorization"));
 }
 
 export function extractUrlIdToken(request: Request): string | null {
-  const token = new URL(request.url).searchParams.get("id_token")?.trim();
-  return token || null;
+  return normalizeSessionToken(
+    new URL(request.url).searchParams.get("id_token"),
+  );
 }
 
 export function isSessionTokenBounceRequest(request: Request): boolean {
@@ -79,7 +97,7 @@ export function resolveSessionTokenForExchange(request: Request): {
   shape: SessionTokenShape;
 } {
   const urlToken = extractUrlIdToken(request);
-  if (urlToken) {
+  if (urlToken !== null) {
     const shape = describeSessionTokenShape(urlToken);
     if (isValidSessionTokenShape(urlToken)) {
       return { token: urlToken, source: "url_id_token", shape };
@@ -88,7 +106,7 @@ export function resolveSessionTokenForExchange(request: Request): {
   }
 
   const bearer = extractBearerSessionToken(request);
-  if (bearer) {
+  if (bearer !== null) {
     const shape = describeSessionTokenShape(bearer);
     if (isValidSessionTokenShape(bearer)) {
       return { token: bearer, source: "authorization_header", shape };
