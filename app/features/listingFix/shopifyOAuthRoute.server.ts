@@ -1,20 +1,26 @@
 import { redirect } from "react-router";
 
 import {
-  logAuthCallbackCompleted,
-  logAuthRouteEntered,
-  logAfterAuthPhase,
-  logOAuthCallbackError,
-  logOAuthRouteEntered,
-} from "./oauthSessionDiagnostics.server";
-import {
   logOAuthBeginResponse,
-  logOAuthCallbackEnteredDetailed,
   logOAuthCallbackQuery,
-  logOAuthCallbackValidationFailure,
   logOAuthCallbackValidationSuccess,
 } from "./oauthCallbackDiagnostics.server";
-import { listingFixShopifyApi } from "./shopifyApi.server";
+import {
+  buildOAuthCallbackErrorResponse,
+  clearOAuthBeginCookieSnapshot,
+  logAfterAuthFailure,
+  logAfterAuthPhase,
+  logAfterAuthSuccess,
+  logAuthCallbackCompleted,
+  logOAuthCallbackRedirectReady,
+  logOAuthCallbackRequestContext,
+  logOAuthCallbackUnhandledFailure,
+  logPrismaStoreSessionFailure,
+  logPrismaStoreSessionSuccess,
+  logShopifyAuthCallbackFailure,
+  logShopifyAuthCallbackStart,
+  logShopifyAuthCallbackSuccess,
+} from "./oauthCallbackTrace.server";
 import {
   appendClearOAuthInProgressCookie,
   escapeEmbeddedOAuthBegin,
@@ -22,7 +28,13 @@ import {
   shouldEscapeEmbeddedOAuthBegin,
 } from "./embeddedOAuthEscape.server";
 import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
+import {
+  logAuthRouteEntered,
+  logOAuthRouteEntered,
+} from "./oauthSessionDiagnostics.server";
 import { getOfflineSessionId, verifyPrismaSessionPersisted } from "./sessionPersistence.server";
+import { listingFixShopifyApi } from "./shopifyApi.server";
+import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
 type OAuthRouteDeps = {
   appUrl: string;
@@ -53,6 +65,18 @@ function buildRedirectUri(appUrl: string, callbackPath: string): string {
   return `${appUrl.replace(/\/$/, "")}${callbackPath}`;
 }
 
+function toResponseHeaders(headers: unknown): Headers {
+  if (headers instanceof Headers) {
+    return headers;
+  }
+
+  if (headers && typeof headers === "object") {
+    return new Headers(headers as Record<string, string>);
+  }
+
+  return new Headers();
+}
+
 async function buildPostOAuthRedirectUrl(
   request: Request,
   shop: string,
@@ -61,7 +85,22 @@ async function buildPostOAuthRedirectUrl(
   const host = new URL(request.url).searchParams.get("host");
 
   if (host) {
-    return listingFixShopifyApi.auth.getEmbeddedAppUrl({ rawRequest: request });
+    try {
+      return await listingFixShopifyApi.auth.getEmbeddedAppUrl({
+        rawRequest: request,
+      });
+    } catch (error) {
+      logListingFixEvent({
+        action: "session_missing",
+        shop,
+        message: error,
+        meta: {
+          event: "oauth_callback_embedded_redirect_fallback",
+          message: sanitizeErrorMessage(error),
+          fallback: `${appUrl}/app?shop=${encodeURIComponent(shop)}&embedded=1`,
+        },
+      });
+    }
   }
 
   return `${appUrl}/app?shop=${encodeURIComponent(shop)}&embedded=1`;
@@ -72,42 +111,44 @@ export async function handleOAuthCallbackRoute(
   deps: OAuthRouteDeps,
   route: string,
 ): Promise<Response> {
+  logOAuthCallbackRequestContext(request);
   logOAuthCallbackQuery(request);
-  logOAuthCallbackEnteredDetailed(
-    new URL(request.url).searchParams.get("shop"),
-    route,
-  );
 
   const url = new URL(request.url);
   const shop = url.searchParams.get("shop");
   const code = url.searchParams.get("code");
 
   if (!code) {
-    logOAuthCallbackValidationFailure(
-      shop,
+    return buildOAuthCallbackErrorResponse(
       new Error("OAuth callback missing code parameter"),
     );
-
-    return new Response("OAuth callback missing code parameter", {
-      status: 400,
-    });
   }
 
   try {
-    logListingFixEventBeforeCallback(shop);
+    logShopifyAuthCallbackStart(shop);
 
-    const { session, headers } = await listingFixShopifyApi.auth.callback({
+    const callbackResult = await listingFixShopifyApi.auth.callback({
       rawRequest: request,
       expiring: deps.expiringOfflineAccessTokens,
     });
 
+    const session = callbackResult.session;
+    const callbackHeaders = callbackResult.headers;
+
+    logShopifyAuthCallbackSuccess(session);
     logOAuthCallbackValidationSuccess(session.shop);
 
     logAfterAuthPhase("afterAuth_before_storeSession", session, {
       route: "oauth.callback",
     });
 
-    await deps.sessionStorage.storeSession(session);
+    try {
+      await deps.sessionStorage.storeSession(session);
+      logPrismaStoreSessionSuccess(session);
+    } catch (storeSessionError) {
+      logPrismaStoreSessionFailure(session, storeSessionError);
+      throw storeSessionError;
+    }
 
     const prismaVerified = await verifyPrismaSessionPersisted(session);
 
@@ -120,8 +161,9 @@ export async function handleOAuthCallbackRoute(
 
     try {
       await deps.runAfterAuth(session, { storeSessionAlreadyCompleted: true });
+      logAfterAuthSuccess(session);
     } catch (afterAuthError) {
-      logOAuthCallbackError(session.shop, afterAuthError);
+      logAfterAuthFailure(session, afterAuthError);
     }
 
     logAuthCallbackCompleted(session.shop, {
@@ -139,12 +181,11 @@ export async function handleOAuthCallbackRoute(
       deps.appUrl,
     );
 
-    const responseHeaders =
-      headers instanceof Headers
-        ? headers
-        : new Headers(headers as Record<string, string>);
+    logOAuthCallbackRedirectReady(session.shop, redirectUrl);
 
+    const responseHeaders = toResponseHeaders(callbackHeaders);
     appendClearOAuthInProgressCookie(responseHeaders);
+    clearOAuthBeginCookieSnapshot(session.shop);
 
     throw redirect(redirectUrl, { headers: responseHeaders });
   } catch (error) {
@@ -152,17 +193,11 @@ export async function handleOAuthCallbackRoute(
       throw error;
     }
 
-    logOAuthCallbackValidationFailure(shop, error);
-    logOAuthCallbackError(shop, error);
-    throw error;
-  }
-}
+    logShopifyAuthCallbackFailure(shop, error);
+    logOAuthCallbackUnhandledFailure(shop, error, request);
 
-function logListingFixEventBeforeCallback(shop: string | null): void {
-  logAuthRouteEntered("/auth/callback", shop, {
-    event: "oauth_callback_execute_start",
-    route: "shopify.auth.callback",
-  });
+    return buildOAuthCallbackErrorResponse(error);
+  }
 }
 
 export async function handleOAuthAuthRoute(

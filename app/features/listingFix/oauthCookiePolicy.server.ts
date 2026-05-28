@@ -1,4 +1,5 @@
 import { normalizeShopifyAppUrl } from "./embeddedAuth.server";
+import { rememberOAuthBeginCookies } from "./oauthBeginCookieSnapshot.server";
 import { logListingFixEvent } from "./telemetry";
 
 const STATE_COOKIE_NAME = "shopify_app_state";
@@ -121,6 +122,11 @@ export function applyEmbeddedOAuthCookiePolicy(
   const originalStateCookie = originalCookies.find((cookie) =>
     cookie.startsWith(`${STATE_COOKIE_NAME}=`),
   );
+
+  const shop = new URL(request.url).searchParams.get("shop");
+  if (shop) {
+    rememberOAuthBeginCookies(shop, rewrittenCookies);
+  }
 
   logListingFixEvent({
     action: "oauth_start",

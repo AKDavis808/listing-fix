@@ -260,6 +260,10 @@ export function logOAuthCallbackError(shop: string | null, error: unknown): void
     meta: {
       event: "oauth_callback_error",
       message: sanitizeErrorMessage(error),
+      errorStack:
+        error instanceof Error && error.stack
+          ? error.stack.slice(0, 2000)
+          : undefined,
     },
   });
 }
@@ -342,6 +346,10 @@ export function logStoreSessionFailure(session: Session, error: unknown): void {
       sessionShop: session.shop,
       isOnline: session.isOnline,
       message: sanitizeErrorMessage(error),
+      errorStack:
+        error instanceof Error && error.stack
+          ? error.stack.slice(0, 2000)
+          : undefined,
     },
   });
 }
