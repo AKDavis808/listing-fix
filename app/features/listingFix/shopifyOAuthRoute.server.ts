@@ -15,6 +15,7 @@ import {
   logOAuthCallbackValidationSuccess,
 } from "./oauthCallbackDiagnostics.server";
 import { listingFixShopifyApi } from "./shopifyApi.server";
+import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
 import { getOfflineSessionId, verifyPrismaSessionPersisted } from "./sessionPersistence.server";
 
 type OAuthRouteDeps = {
@@ -187,12 +188,15 @@ export async function handleOAuthAuthRoute(
       callbackPath: deps.authCallbackPath,
     });
 
-    const beginResponse = (await listingFixShopifyApi.auth.begin({
-      shop,
-      callbackPath: deps.authCallbackPath,
-      isOnline: false,
-      rawRequest: request,
-    })) as Response;
+    const beginResponse = applyEmbeddedOAuthCookiePolicy(
+      (await listingFixShopifyApi.auth.begin({
+        shop,
+        callbackPath: deps.authCallbackPath,
+        isOnline: false,
+        rawRequest: request,
+      })) as Response,
+      request,
+    );
 
     logOAuthBeginResponse(
       request,

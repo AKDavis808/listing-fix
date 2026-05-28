@@ -5,13 +5,17 @@ import {
   ShopifyError,
 } from "@shopify/shopify-api";
 
+import {
+  applyEmbeddedOAuthCookiePolicy,
+  logCallbackCookiePresence,
+  STATE_COOKIE_NAME,
+} from "./oauthCookiePolicy.server";
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
 const EXPECTED_PRODUCTION_APP_URL =
   "https://listing-fix-production.up.railway.app";
 const EXPECTED_CALLBACK_PATH = "/auth/callback";
 const EXPECTED_REDIRECT_URL = `${EXPECTED_PRODUCTION_APP_URL}${EXPECTED_CALLBACK_PATH}`;
-const STATE_COOKIE_NAME = "shopify_app_state";
 
 export function logStartupUrlConfigDiagnostic(
   appUrl: string,
@@ -64,6 +68,8 @@ function getCookieNames(cookieHeader: string | null): string[] {
 }
 
 export function logOAuthCallbackQuery(request: Request): void {
+  logCallbackCookiePresence(request);
+
   const url = new URL(request.url);
   const shop = url.searchParams.get("shop");
   const code = url.searchParams.get("code");
@@ -92,6 +98,9 @@ export function logOAuthCallbackQuery(request: Request): void {
       oauthErrorDescription,
       cookieHeaderPresent: Boolean(cookieHeader),
       stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
+      callback_cookie_present: cookieNames.includes(STATE_COOKIE_NAME),
+      oauth_cookie_samesite: "none",
+      oauth_cookie_secure: true,
       cookieNames: cookieNames.join(","),
       referer: request.headers.get("referer") ?? null,
       userAgentPresent: Boolean(request.headers.get("user-agent")),
@@ -139,6 +148,8 @@ export function logOAuthBeginResponse(
       setCookieHasStateCookie: setCookie?.includes(STATE_COOKIE_NAME) ?? false,
       setCookieSameSite: extractCookieAttribute(setCookie, "SameSite"),
       setCookieSecure: extractCookieAttribute(setCookie, "Secure"),
+      oauth_cookie_samesite: extractCookieAttribute(setCookie, "SameSite"),
+      oauth_cookie_secure: extractCookieAttribute(setCookie, "Secure"),
       setCookiePath: extractCookieAttribute(setCookie, "Path"),
       embedded: url.searchParams.get("embedded") === "1",
       hasHost: Boolean(url.searchParams.get("host")),

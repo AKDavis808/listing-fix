@@ -15,6 +15,7 @@ import {
   normalizeShopifyAppUrl,
 } from "./features/listingFix/embeddedAuth.server";
 import { logStartupUrlConfigDiagnostic } from "./features/listingFix/oauthCallbackDiagnostics.server";
+import { logOAuthCookiePolicyStartup } from "./features/listingFix/oauthCookiePolicy.server";
 import {
   logAuthRouteWiringDiagnostic,
   logStartupSessionDiagnostics,
@@ -57,6 +58,7 @@ logAuthDiagnosticOnce("shopify_auth_config", () => {
 void logStartupSessionDiagnostics();
 logAuthRouteWiringDiagnostic(appUrl, distribution);
 logStartupUrlConfigDiagnostic(appUrl, AUTH_CALLBACK_PATH, apiKey, scopes);
+logOAuthCookiePolicyStartup();
 
 type AfterAuthHookOptions = {
   session: Session;
