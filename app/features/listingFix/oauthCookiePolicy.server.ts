@@ -23,6 +23,11 @@ export function isHttpsProductionApp(): boolean {
 
 export function isEmbeddedOAuthContext(request: Request): boolean {
   const url = new URL(request.url);
+
+  if (url.searchParams.get("embedded") === "0") {
+    return false;
+  }
+
   return (
     url.searchParams.get("embedded") === "1" ||
     Boolean(url.searchParams.get("host"))

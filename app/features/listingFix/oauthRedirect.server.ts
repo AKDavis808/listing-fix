@@ -2,7 +2,9 @@ import { redirect } from "react-router";
 
 import db from "../../db.server";
 import {
+  buildAuthTopLevelEscapeUrl,
   buildOAuthInProgressCookie,
+  isEmbeddedOAuthRequest,
   isOAuthInProgress,
   logOAuthInProgressSkip,
 } from "./embeddedOAuthEscape.server";
@@ -27,13 +29,13 @@ export function buildOAuthAuthUrl(request: Request): string {
   if (shop) params.set("shop", shop);
 
   const host = url.searchParams.get("host");
-  if (host) {
-    params.set("host", host);
-    params.set("embedded", "1");
-  } else if (url.searchParams.get("embedded") === "1") {
-    params.set("embedded", "1");
+  if (host) params.set("host", host);
+
+  if (isEmbeddedOAuthRequest(request)) {
+    return buildAuthTopLevelEscapeUrl(request);
   }
 
+  params.set("embedded", "0");
   const query = params.toString();
   return `/auth${query ? `?${query}` : ""}`;
 }

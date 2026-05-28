@@ -23,9 +23,9 @@ import {
 } from "./oauthCallbackTrace.server";
 import {
   appendClearOAuthInProgressCookie,
-  escapeEmbeddedOAuthBegin,
   logOAuthEmbeddedDetected,
-  shouldEscapeEmbeddedOAuthBegin,
+  redirectEmbeddedAuthToTopLevelEscape,
+  shouldDeferOAuthBeginToTopLevel,
 } from "./embeddedOAuthEscape.server";
 import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
 import {
@@ -59,6 +59,10 @@ function isOAuthCallbackPath(pathname: string): boolean {
   return (
     pathname.endsWith("/callback") || pathname.endsWith("/shopify/callback")
   );
+}
+
+function isAuthTopLevelPath(pathname: string): boolean {
+  return pathname === "/auth/top-level" || pathname.endsWith("/auth/top-level");
 }
 
 function isAuthRootPath(pathname: string): boolean {
@@ -217,6 +221,10 @@ export async function handleOAuthAuthRoute(
     return handleOAuthCallbackRoute(request, deps, "shopifyOAuthRoute");
   }
 
+  if (isAuthTopLevelPath(pathname)) {
+    return null;
+  }
+
   if (isAuthRootPath(pathname) && shop && !isCallback) {
     logOAuthRouteEntered(pathname, shop, {
       route: "auth._index",
@@ -227,16 +235,19 @@ export async function handleOAuthAuthRoute(
       route: "oauth.begin",
     });
 
-    if (shouldEscapeEmbeddedOAuthBegin(request)) {
+    if (shouldDeferOAuthBeginToTopLevel(request)) {
       logOAuthEmbeddedDetected(request, shop);
+      redirectEmbeddedAuthToTopLevelEscape(request);
     }
 
     const redirectUri = buildRedirectUri(deps.appUrl, deps.authCallbackPath);
 
     logAuthRouteEntered(pathname, shop, {
-      event: "oauth_begin_redirect_uri",
+      event: "oauth_top_level_auth_begin",
       redirectUri,
       callbackPath: deps.authCallbackPath,
+      embedded: new URL(request.url).searchParams.get("embedded"),
+      secFetchDest: request.headers.get("sec-fetch-dest"),
     });
 
     const rawBeginResponse = (await listingFixShopifyApi.auth.begin({
@@ -257,9 +268,10 @@ export async function handleOAuthAuthRoute(
       action: "oauth_start",
       shop,
       meta: {
-        event: "oauth_begin_set_cookie_counts",
-        auth_begin_set_cookie_count: authBeginSetCookieCount,
+        event: "oauth_top_level_set_cookie_count",
+        oauth_top_level_set_cookie_count: authBeginSetCookieCount,
         policy_set_cookie_count: setCookies.length,
+        auth_begin_set_cookie_count: authBeginSetCookieCount,
         rawSetCookieNames: extractSetCookieHeaders(rawBeginResponse.headers)
           .map((cookie) => cookie.split("=")[0])
           .join(","),
@@ -272,10 +284,6 @@ export async function handleOAuthAuthRoute(
       redirectUri,
       deps.authCallbackPath,
     );
-
-    if (shouldEscapeEmbeddedOAuthBegin(request)) {
-      escapeEmbeddedOAuthBegin(request, beginResponse, shop, setCookies);
-    }
 
     return beginResponse;
   }

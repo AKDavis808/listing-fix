@@ -88,6 +88,7 @@ export function logOAuthCallbackRequestContext(request: Request): void {
     oauth_callback_hmac_present: Boolean(url.searchParams.get("hmac")),
     oauth_callback_timestamp_present: Boolean(url.searchParams.get("timestamp")),
     cookieHeaderPresent: Boolean(cookieHeader),
+    oauth_callback_cookie_header_present: Boolean(cookieHeader),
     callback_cookie_names: cookieNames.join(","),
     stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
   });

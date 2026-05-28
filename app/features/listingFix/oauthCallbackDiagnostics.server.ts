@@ -98,6 +98,7 @@ export function logOAuthCallbackQuery(request: Request): void {
       oauthError,
       oauthErrorDescription,
       cookieHeaderPresent: Boolean(cookieHeader),
+      oauth_callback_cookie_header_present: Boolean(cookieHeader),
       stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
       callback_cookie_present: cookieNames.includes(STATE_COOKIE_NAME),
       callback_cookie_names: cookieNames.join(","),

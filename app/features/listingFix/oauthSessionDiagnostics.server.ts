@@ -280,14 +280,16 @@ export function logAuthRouteWiringDiagnostic(
       callbackPath: "/auth/callback",
       routesMounted: [
         "routes/auth._index (/auth)",
+        "routes/auth.top-level (/auth/top-level)",
         "routes/auth.callback (/auth/callback)",
         "routes/auth.$ (auth/* fallback)",
         "routes/auth.login",
         "routes/auth.session-token",
+        "routes/auth.exit-iframe",
       ],
       distribution,
       appUrl,
-      note: "Missing offline session must redirect to /auth (OAuth begin), not /auth/session-token bounce; session-token only after OAuth succeeds",
+      note: "Embedded OAuth must escape to /auth/top-level before auth.begin(); top-level /auth?embedded=0 sets OAuth cookies then 302 to Shopify",
     },
   });
 }
