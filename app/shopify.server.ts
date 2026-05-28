@@ -4,6 +4,8 @@ import {
   AppDistribution,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
+import type { Session } from "@shopify/shopify-api";
+
 import prisma from "./db.server";
 import { logAuthDiagnosticOnce } from "./features/listingFix/authDiagnostics.server";
 import {
@@ -14,10 +16,15 @@ import {
 import {
   logAfterAuthFinished,
   logAfterAuthStart,
+  logAuthRouteWiringDiagnostic,
   logStartupSessionDiagnostics,
 } from "./features/listingFix/oauthSessionDiagnostics.server";
 import { InstrumentedPrismaSessionStorage } from "./features/listingFix/prismaSessionStorage.server";
+import { handleOAuthAuthRoute } from "./features/listingFix/shopifyOAuthRoute.server";
 import { verifyPrismaSessionPersisted } from "./features/listingFix/sessionPersistence.server";
+
+export const AUTH_PATH_PREFIX = "/auth";
+export const AUTH_CALLBACK_PATH = `${AUTH_PATH_PREFIX}/callback`;
 
 const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
 const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
@@ -35,6 +42,8 @@ logAuthDiagnosticOnce("shopify_auth_config", () => {
     distribution,
     useOnlineTokens,
     expiringOfflineAccessTokens,
+    authPathPrefix: AUTH_PATH_PREFIX,
+    authCallbackPath: AUTH_CALLBACK_PATH,
     sessionStorage: "InstrumentedPrismaSessionStorage",
     hasApiKey: Boolean(apiKey),
     hasApiSecret: Boolean(apiSecretKey),
@@ -44,6 +53,15 @@ logAuthDiagnosticOnce("shopify_auth_config", () => {
 });
 
 void logStartupSessionDiagnostics();
+logAuthRouteWiringDiagnostic(appUrl, distribution);
+
+export async function runListingFixAfterAuth(session: Session): Promise<void> {
+  logAfterAuthStart(session);
+
+  const prismaVerified = await verifyPrismaSessionPersisted(session);
+
+  logAfterAuthFinished(session, prismaVerified, true);
+}
 
 const shopify = shopifyApp({
   apiKey,
@@ -51,7 +69,7 @@ const shopify = shopifyApp({
   apiVersion: ApiVersion.October25,
   scopes,
   appUrl,
-  authPathPrefix: "/auth",
+  authPathPrefix: AUTH_PATH_PREFIX,
   sessionStorage,
   distribution,
   useOnlineTokens,
@@ -60,11 +78,7 @@ const shopify = shopifyApp({
   },
   hooks: {
     afterAuth: async ({ session }) => {
-      logAfterAuthStart(session);
-
-      const prismaVerified = await verifyPrismaSessionPersisted(session);
-
-      logAfterAuthFinished(session, prismaVerified);
+      await runListingFixAfterAuth(session);
     },
   },
   ...(process.env.SHOP_CUSTOM_DOMAIN
@@ -75,16 +89,28 @@ const shopify = shopifyApp({
 export default shopify;
 export const apiVersion = ApiVersion.October25;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
+export const authenticateAdminRaw = shopify.authenticate.admin.bind(
+  shopify.authenticate,
+);
 export const authenticate = {
   ...shopify.authenticate,
   admin: (request: Request) =>
-    authenticateEmbeddedAdmin(
-      request,
-      shopify.authenticate.admin.bind(shopify.authenticate),
-    ),
+    authenticateEmbeddedAdmin(request, authenticateAdminRaw),
 };
 export const unauthenticated = shopify.unauthenticated;
 export const login = (request: Request) =>
   loginWithEmbeddedContext(request, shopify.login.bind(shopify));
 export const registerWebhooks = shopify.registerWebhooks;
 export { sessionStorage };
+
+export async function handleShopifyOAuthAuthRoute(
+  request: Request,
+): Promise<Response | null> {
+  return handleOAuthAuthRoute(request, {
+    appUrl,
+    authCallbackPath: AUTH_CALLBACK_PATH,
+    expiringOfflineAccessTokens,
+    runAfterAuth: runListingFixAfterAuth,
+    sessionStorage,
+  });
+}

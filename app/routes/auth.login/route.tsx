@@ -8,12 +8,10 @@ import translations from "@shopify/polaris/locales/en.json";
 
 import { ListingFixEmbeddedAuthFallback } from "../../components/listingFix/ListingFixEmbeddedAuthFallback";
 import {
-  buildEmbeddedOAuthInstallUrl,
   hasShopParam,
   isEmbeddedLoginRequest,
   logEmbeddedAuthEvent,
 } from "../../features/listingFix/embeddedAuth.server";
-import { logAuthDiagnosticOnce } from "../../features/listingFix/authDiagnostics.server";
 import { logAuthRouteEntered } from "../../features/listingFix/oauthSessionDiagnostics.server";
 import { logListingFixEvent } from "../../features/listingFix/telemetry";
 import { login } from "../../shopify.server";
@@ -42,27 +40,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     });
   }
 
-  if (isEmbedded && hasShop && shop) {
-    logEmbeddedAuthEvent("session_missing", request, {
+  if (hasShop && shop) {
+    logEmbeddedAuthEvent("oauth_start", request, {
       route: "auth.login",
-      reason: "embedded_oauth_recovery",
-    });
-    logListingFixEvent({
-      action: "session_missing",
-      shop,
-      meta: {
-        event: "embedded_session_missing_offline_session",
-        route: "auth.login",
-      },
+      forceOAuthRedirect: true,
+      embedded: isEmbedded,
     });
 
+    const errors = loginErrorMessage(await login(request));
+
     return {
-      errors: {},
+      errors,
       isEmbedded,
       hasShop,
       // eslint-disable-next-line no-undef
       apiKey: process.env.SHOPIFY_API_KEY || "",
-      oauthInstallUrl: buildEmbeddedOAuthInstallUrl(shop),
+      oauthInstallUrl: null as string | null,
     };
   }
 

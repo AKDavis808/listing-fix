@@ -73,13 +73,17 @@ export function logAuthCallbackEntered(shop: string | null): void {
   });
 }
 
-export function logAuthCallbackCompleted(shop: string | null): void {
+export function logAuthCallbackCompleted(
+  shop: string | null,
+  meta?: Record<string, string | number | boolean | null | undefined>,
+): void {
   logListingFixEvent({
     action: "oauth_complete",
     shop,
     meta: {
       event: "oauth_callback_completed",
       route: "auth.$",
+      ...meta,
     },
   });
 }
@@ -108,17 +112,55 @@ export function logAfterAuthStart(session: Session): void {
 export function logAfterAuthFinished(
   session: Session,
   prismaVerified: boolean,
+  storeSessionSucceeded?: boolean,
 ): void {
   logListingFixEvent({
     action: prismaVerified ? "session_restored" : "session_missing",
     shop: session.shop,
     meta: {
-      event: "afterAuth_finished",
+      event: "afterAuth_complete",
       afterAuth_shop: session.shop,
       afterAuth_session_id: session.id,
       afterAuth_isOnline: session.isOnline,
       afterAuth_accessToken_present: Boolean(session.accessToken),
       prismaVerified,
+      storeSessionSucceeded,
+      expectedOfflineSessionId: getOfflineSessionId(session.shop),
+      offlineIdMatches: session.id === getOfflineSessionId(session.shop),
+    },
+  });
+}
+
+export function logOAuthCallbackError(shop: string | null, error: unknown): void {
+  logListingFixEvent({
+    action: "session_missing",
+    shop,
+    message: error,
+    meta: {
+      event: "oauth_callback_error",
+      message: sanitizeErrorMessage(error),
+    },
+  });
+}
+
+export function logAuthRouteWiringDiagnostic(
+  appUrl: string,
+  distribution: string,
+): void {
+  logListingFixEvent({
+    action: "session_restored",
+    meta: {
+      event: "auth_route_wiring",
+      authPathPrefix: "/auth",
+      callbackPath: "/auth/callback",
+      routesMounted: [
+        "routes/auth.$ (auth/*)",
+        "routes/auth.login",
+        "routes/auth.session-token",
+      ],
+      distribution,
+      appUrl,
+      note: "App Store apps also persist sessions via token exchange on bearer-authenticated /app requests; /auth/session-token 200 is bounce HTML only",
     },
   });
 }

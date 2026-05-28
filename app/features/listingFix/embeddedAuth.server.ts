@@ -1,7 +1,10 @@
 import { redirect } from "react-router";
 
 import { logAuthDiagnosticOnce } from "./authDiagnostics.server";
-import { logOfflineSessionMissingOnce } from "./sessionPersistence.server";
+import {
+  getOfflineSessionId,
+  logOfflineSessionMissingOnce,
+} from "./sessionPersistence.server";
 import { logListingFixEvent } from "./telemetry";
 
 export type EmbeddedAuthEvent =
@@ -277,17 +280,35 @@ export async function authenticateEmbeddedAdmin<T extends AdminAuthResult>(
 
   try {
     const result = await authenticateAdmin(request);
-    logAuthDiagnosticOnce(`session_restored:${result.session.shop}`, () => {
-      logEmbeddedAuthEvent("session_restored", request, {
+    logListingFixEvent({
+      action: "session_restored",
+      shop: result.session.shop,
+      meta: {
+        event: "session_restored",
+        pathname: ctx.pathname,
         sessionShop: result.session.shop,
         sessionId: result.session.id,
         isOnline: result.session.isOnline,
-      });
+        expectedOfflineSessionId: getOfflineSessionId(result.session.shop),
+        offlineIdMatches:
+          result.session.id === getOfflineSessionId(result.session.shop),
+      },
     });
     return result;
   } catch (error) {
     if (isUnauthorizedResponse(error)) {
       if (ctx.shop) {
+        logListingFixEvent({
+          action: "session_missing",
+          shop: ctx.shop,
+          meta: {
+            event: "embedded_auth_failure",
+            pathname: ctx.pathname,
+            offlineSessionId: getOfflineSessionId(ctx.shop),
+            hasBearer: ctx.hasSessionTokenHeader,
+            authRequestType: ctx.authRequestType,
+          },
+        });
         logOfflineSessionMissingOnce(ctx.shop);
       }
       await handleEmbeddedUnauthorized(request, error);
