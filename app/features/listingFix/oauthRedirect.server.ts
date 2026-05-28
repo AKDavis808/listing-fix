@@ -8,6 +8,12 @@ import {
   isOAuthInProgress,
   logOAuthInProgressSkip,
 } from "./embeddedOAuthEscape.server";
+import {
+  appendAuthFlowIdToUrl,
+  buildAuthFlowCookie,
+  getOrCreateAuthFlowId,
+  recordAuthFlowStep,
+} from "./authFlowTelemetry.server";
 import { logRedirectToOAuth } from "./oauthSessionDiagnostics.server";
 import { getOfflineSessionId } from "./sessionPersistence.server";
 
@@ -61,13 +67,20 @@ export async function ensureOfflineSessionOrRedirectToOAuth(
   }
 
   const offlineSessionId = getOfflineSessionId(shop);
-  const target = buildOAuthAuthUrl(request);
+  const flowId = getOrCreateAuthFlowId(request);
+  const target = appendAuthFlowIdToUrl(buildOAuthAuthUrl(request), flowId);
 
   logRedirectToOAuth(request, shop, offlineSessionId, reason, target);
-
-  throw redirect(target, {
-    headers: {
-      "set-cookie": buildOAuthInProgressCookie(),
-    },
+  recordAuthFlowStep(request, "redirect_to_oauth", {
+    reason,
+    target,
+    flowId,
+    pathname: url.pathname,
   });
+
+  const headers = new Headers();
+  headers.append("set-cookie", buildOAuthInProgressCookie());
+  headers.append("set-cookie", buildAuthFlowCookie(flowId));
+
+  throw redirect(target, { headers });
 }

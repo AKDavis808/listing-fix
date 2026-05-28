@@ -18,7 +18,9 @@
     "prisma": "prisma",
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
-    "typecheck": "react-router typegen && tsc --noEmit"
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "auth:doctor": "node scripts/auth-doctor.mjs",
+    "auth:e2e": "node scripts/auth-e2e.mjs"
   },
   "type": "module",
   "engines": {
@@ -59,7 +61,8 @@
     "graphql-config": "^5.1.1",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3",
-    "vite": "^6.3.6"
+    "vite": "^6.3.6",
+    "playwright": "^1.52.0"
   },
   "workspaces": [
     "extensions/*"

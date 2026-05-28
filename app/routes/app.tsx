@@ -18,16 +18,26 @@ import {
 } from "../components/listingFix/ListingFixFeedback";
 import { ListingFixTelemetryBootstrap } from "../components/listingFix/ListingFixTelemetryBootstrap";
 import { ensureOfflineSessionOrRedirectToOAuth } from "../features/listingFix/oauthRedirect.server";
+import { recordAuthFlowStep, markAuthFlowSuccess } from "../features/listingFix/authFlowTelemetry.server";
 import { logAppAuthenticateSuccess } from "../features/listingFix/oauthSessionDiagnostics.server";
 import { logListingFixEvent } from "../features/listingFix/telemetry";
 import { authenticateAdminRaw } from "../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const url = new URL(request.url);
+  recordAuthFlowStep(request, "app_enter", {
+    pathname: url.pathname,
+    shop: url.searchParams.get("shop"),
+    embedded: url.searchParams.get("embedded"),
+    hasHost: Boolean(url.searchParams.get("host")),
+  });
+
   await ensureOfflineSessionOrRedirectToOAuth(request, "app_missing_offline_session");
 
   const { session } = await authenticateAdminRaw(request);
 
   logAppAuthenticateSuccess(session.shop, session.id);
+  markAuthFlowSuccess(request);
 
   logListingFixEvent({
     action: "session_restored",

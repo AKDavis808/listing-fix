@@ -6,6 +6,7 @@ import {
   isEmbeddedOAuthRequest,
   logOAuthEmbeddedDetected,
 } from "../../features/listingFix/embeddedOAuthEscape.server";
+import { recordAuthFlowStep } from "../../features/listingFix/authFlowTelemetry.server";
 import { handleShopifyOAuthAuthRoute } from "../../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -23,6 +24,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (isEmbeddedOAuthRequest(request)) {
     logOAuthEmbeddedDetected(request, shop);
   }
+
+  recordAuthFlowStep(request, "auth_enter", {
+    pathname: url.pathname,
+    shop,
+    embedded: url.searchParams.get("embedded"),
+    hasHost: Boolean(url.searchParams.get("host")),
+  });
 
   const oauthResponse = await handleShopifyOAuthAuthRoute(request);
   if (oauthResponse) {

@@ -280,6 +280,7 @@ export function logAuthRouteWiringDiagnostic(
       callbackPath: "/auth/callback",
       routesMounted: [
         "routes/auth._index (/auth)",
+        "routes/auth.debug (/auth/debug)",
         "routes/auth.top-level (/auth/top-level)",
         "routes/auth.callback (/auth/callback)",
         "routes/auth.$ (auth/* fallback)",

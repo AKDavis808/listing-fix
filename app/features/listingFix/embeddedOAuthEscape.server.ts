@@ -1,6 +1,7 @@
 import { redirect } from "react-router";
 
 import { logListingFixEvent } from "./telemetry";
+import { readAuthFlowId, recordAuthFlowStep } from "./authFlowTelemetry.server";
 
 const OAUTH_IN_PROGRESS_COOKIE = "listingfix_oauth_in_progress";
 const EXIT_IFRAME_PATH = "/auth/exit-iframe";
@@ -58,6 +59,9 @@ export function buildTopLevelOAuthBeginUrl(
   if (host) params.set("host", host);
 
   params.set("embedded", "0");
+
+  const flowId = readAuthFlowId(request);
+  if (flowId) params.set("authFlowId", flowId);
 
   return `${appUrl.replace(/\/$/, "")}/auth?${params.toString()}`;
 }
@@ -208,6 +212,10 @@ export function renderAuthTopLevelEscapePage(
 
   logOAuthEscapeBeforeBegin(request, shop);
   logOAuthEmbeddedDetected(request, shop);
+  recordAuthFlowStep(request, "oauth_escape_before_begin", {
+    shop,
+    pathname: url.pathname,
+  });
 
   const topLevelAuthUrl = buildTopLevelOAuthBeginUrl(request, appUrl);
   const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";

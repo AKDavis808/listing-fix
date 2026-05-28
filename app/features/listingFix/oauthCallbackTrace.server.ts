@@ -15,6 +15,7 @@ import {
   logOAuthCallbackValidationFailure,
 } from "./oauthCallbackDiagnostics.server";
 import { STATE_COOKIE_NAME } from "./oauthCookiePolicy.server";
+import { recordAuthFlowStep } from "./authFlowTelemetry.server";
 import {
   logAfterAuthPhase,
   logAuthCallbackCompleted,
@@ -91,6 +92,14 @@ export function logOAuthCallbackRequestContext(request: Request): void {
     oauth_callback_cookie_header_present: Boolean(cookieHeader),
     callback_cookie_names: cookieNames.join(","),
     stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
+  });
+
+  recordAuthFlowStep(request, "oauth_callback_entered", {
+    shop,
+    pathname: url.pathname,
+    cookieHeaderPresent: Boolean(cookieHeader),
+    stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
+    oauth_callback_cookie_header_present: Boolean(cookieHeader),
   });
 }
 

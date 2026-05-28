@@ -28,6 +28,7 @@ import {
   shouldDeferOAuthBeginToTopLevel,
 } from "./embeddedOAuthEscape.server";
 import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
+import { recordAuthFlowStep } from "./authFlowTelemetry.server";
 import {
   countSetCookieHeaders,
   extractSetCookieHeaders,
@@ -145,6 +146,10 @@ export async function handleOAuthCallbackRoute(
 
     logShopifyAuthCallbackSuccess(session);
     logOAuthCallbackValidationSuccess(session.shop);
+    recordAuthFlowStep(request, "oauth_callback_validation_success", {
+      shop: session.shop,
+      sessionId: session.id,
+    });
 
     logAfterAuthPhase("afterAuth_before_storeSession", session, {
       route: "oauth.callback",
@@ -153,12 +158,27 @@ export async function handleOAuthCallbackRoute(
     try {
       await deps.sessionStorage.storeSession(session);
       logPrismaStoreSessionSuccess(session);
+      recordAuthFlowStep(request, "prisma_storeSession_success", {
+        shop: session.shop,
+        sessionId: session.id,
+      });
     } catch (storeSessionError) {
       logPrismaStoreSessionFailure(session, storeSessionError);
+      recordAuthFlowStep(request, "prisma_storeSession_failure", {
+        shop: session.shop,
+        sessionId: session.id,
+        message: sanitizeErrorMessage(storeSessionError),
+      });
       throw storeSessionError;
     }
 
     const prismaVerified = await verifyPrismaSessionPersisted(session);
+
+    recordAuthFlowStep(request, "prisma_session_lookup_after_save", {
+      shop: session.shop,
+      sessionId: session.id,
+      prismaVerified,
+    });
 
     logAfterAuthPhase("afterAuth_after_storeSession", session, {
       prismaVerified,
@@ -203,6 +223,11 @@ export async function handleOAuthCallbackRoute(
 
     logShopifyAuthCallbackFailure(shop, error);
     logOAuthCallbackUnhandledFailure(shop, error, request);
+    recordAuthFlowStep(request, "oauth_callback_validation_failure", {
+      shop,
+      failureType: error instanceof Error ? error.name : "unknown",
+      message: sanitizeErrorMessage(error),
+    });
 
     return buildOAuthCallbackErrorResponse(error);
   }
@@ -250,6 +275,12 @@ export async function handleOAuthAuthRoute(
       secFetchDest: request.headers.get("sec-fetch-dest"),
     });
 
+    recordAuthFlowStep(request, "auth_begin_start", {
+      pathname,
+      shop,
+      redirectUri,
+    });
+
     const rawBeginResponse = (await listingFixShopifyApi.auth.begin({
       shop,
       callbackPath: deps.authCallbackPath,
@@ -277,6 +308,20 @@ export async function handleOAuthAuthRoute(
           .join(","),
       },
     });
+
+    recordAuthFlowStep(request, "auth_begin_set_cookie_count", {
+      shop,
+      auth_begin_set_cookie_count: authBeginSetCookieCount,
+      policy_set_cookie_count: setCookies.length,
+    });
+
+    const authorizeUrl = beginResponse.headers.get("location");
+    if (authorizeUrl) {
+      recordAuthFlowStep(request, "oauth_authorize_url", {
+        shop,
+        oauth_redirect_location: authorizeUrl,
+      });
+    }
 
     logOAuthBeginResponse(
       request,

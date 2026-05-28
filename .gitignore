@@ -13,6 +13,9 @@ node_modules
 /prisma/dev.sqlite-journal
 database.sqlite
 
+.auth-debug/
+auth-debug-report.md
+
 .env
 .env.*
 !.env.example
