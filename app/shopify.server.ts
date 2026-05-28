@@ -122,6 +122,7 @@ export const authenticate = {
             bootstrap_status: bootstrapResult.status,
             bootstrap_decision: bootstrapResult.decision,
             bootstrap_verify_session_saved: bootstrapResult.sessionVerified,
+            token_exchange_token_source: bootstrapResult.tokenSource,
             offlineSessionId: bootstrapResult.offlineSessionId,
           },
         });

@@ -1,4 +1,3 @@
-import type { Session } from "@shopify/shopify-api";
 import { RequestedTokenType, type Shopify } from "@shopify/shopify-api";
 import type { SessionStorage } from "@shopify/shopify-app-session-storage";
 
@@ -26,6 +25,7 @@ export type BootstrapResult = {
   decision: BootstrapDecision;
   sessionVerified: boolean;
   offlineSessionId: string | null;
+  tokenSource: "authorization_header" | "url_id_token" | "missing";
 };
 
 type BootstrapPhase =
@@ -78,11 +78,11 @@ function logBootstrapPhase(
 ): void {
   logListingFixEvent({
     action:
-      phase === "bootstrap_persist_failure" || phase === "bootstrap_finished"
-        ? phase === "bootstrap_persist_failure"
-          ? "session_missing"
-          : "session_restored"
-        : "oauth_start",
+      phase === "bootstrap_persist_failure"
+        ? "session_missing"
+        : phase === "bootstrap_finished"
+          ? "session_restored"
+          : "oauth_start",
     shop,
     meta: {
       event: phase,
@@ -103,6 +103,7 @@ function logBootstrapDecision(
       meta: {
         event: "token_exchange_bootstrap_decision",
         bootstrap_decision: context.decision,
+        token_exchange_token_source: context.tokenSource,
         hasUrlIdToken: Boolean(context.urlIdToken),
         hasAuthorizationHeader: context.hasAuthorizationHeader,
         isBounceRequest: context.isBounceRequest,
@@ -119,14 +120,15 @@ function logBootstrapDecision(
 }
 
 function skippedResult(
-  decision: BootstrapDecision,
+  context: BootstrapRequestContext,
   offlineSessionId: string | null,
 ): BootstrapResult {
   return {
     status: "skipped",
-    decision,
-    sessionVerified: decision === "skip_existing_session",
+    decision: context.decision,
+    sessionVerified: context.decision === "skip_existing_session",
     offlineSessionId,
+    tokenSource: context.tokenSource,
   };
 }
 
@@ -147,49 +149,56 @@ async function runBootstrapWork(
     hasExistingOfflineSession,
   );
 
-  if (context.decision !== "bootstrap_from_url_id_token") {
+  if (context.decision !== "bootstrap_from_authorization_header") {
     logBootstrapDecision(shop, context, { offlineSessionId });
     logBootstrapPhase(shop, "bootstrap_finished", {
       bootstrap_decision: context.decision,
       bootstrap_status: "skipped",
+      token_exchange_token_source: context.tokenSource,
     });
-    return skippedResult(context.decision, offlineSessionId);
+    return skippedResult(context, offlineSessionId);
   }
 
   const token = context.token;
   if (!token) {
     logBootstrapDecision(shop, context, {
       offlineSessionId,
-      reason: "missing_normalized_url_id_token",
+      reason: "missing_normalized_authorization_token",
     });
     logBootstrapPhase(shop, "bootstrap_finished", {
-      bootstrap_decision: "skip_missing_id_token",
+      bootstrap_decision: "skip_missing_token",
       bootstrap_status: "skipped",
+      token_exchange_token_source: context.tokenSource,
     });
-    return skippedResult("skip_missing_id_token", offlineSessionId);
+    return skippedResult(
+      { ...context, decision: "skip_missing_token" },
+      offlineSessionId,
+    );
   }
 
   if (shouldSkipRejectedToken(shop, token)) {
     logBootstrapPhase(shop, "bootstrap_finished", {
       bootstrap_decision: context.decision,
       bootstrap_status: "skipped_rejected_token",
+      token_exchange_token_source: "authorization_header",
     });
     return {
       status: "skipped",
       decision: context.decision,
       sessionVerified: false,
       offlineSessionId,
+      tokenSource: "authorization_header",
     };
   }
 
   logBootstrapDecision(shop, context, {
     offlineSessionId,
-    token_exchange_token_source: "url_id_token",
+    token_exchange_token_source: "authorization_header",
   });
   logBootstrapPhase(shop, "bootstrap_started", {
     bootstrap_decision: context.decision,
     offlineSessionId,
-    token_exchange_token_source: "url_id_token",
+    token_exchange_token_source: "authorization_header",
   });
 
   try {
@@ -203,12 +212,13 @@ async function runBootstrapWork(
     logBootstrapPhase(shop, "bootstrap_exchange_complete", {
       sessionId: exchangedSession.id,
       offlineSessionId,
+      token_exchange_token_source: "authorization_header",
     });
 
     logSessionPersistenceEvent("token_exchange_success", shop, {
       sessionId: exchangedSession.id,
       bootstrap_decision: context.decision,
-      token_exchange_token_source: "url_id_token",
+      token_exchange_token_source: "authorization_header",
     });
 
     const stored = await sessionStorage.storeSession(exchangedSession);
@@ -217,6 +227,7 @@ async function runBootstrapWork(
       sessionId: exchangedSession.id,
       stored,
       offlineSessionId,
+      token_exchange_token_source: "authorization_header",
     });
 
     const sessionVerified = await verifyBootstrapSessionSaved(
@@ -229,6 +240,7 @@ async function runBootstrapWork(
       bootstrap_verify_session_saved: sessionVerified,
       sessionId: exchangedSession.id,
       offlineSessionId,
+      token_exchange_token_source: "authorization_header",
     });
 
     if (!sessionVerified) {
@@ -236,17 +248,20 @@ async function runBootstrapWork(
         sessionId: exchangedSession.id,
         offlineSessionId,
         stored,
+        token_exchange_token_source: "authorization_header",
       });
       logBootstrapPhase(shop, "bootstrap_finished", {
         bootstrap_status: "failure",
         bootstrap_decision: context.decision,
         bootstrap_verify_session_saved: false,
+        token_exchange_token_source: "authorization_header",
       });
       return {
         status: "failure",
         decision: context.decision,
         sessionVerified: false,
         offlineSessionId,
+        tokenSource: "authorization_header",
       };
     }
 
@@ -256,6 +271,7 @@ async function runBootstrapWork(
       bootstrap_verify_session_saved: true,
       sessionId: exchangedSession.id,
       offlineSessionId,
+      token_exchange_token_source: "authorization_header",
     });
 
     return {
@@ -263,22 +279,27 @@ async function runBootstrapWork(
       decision: context.decision,
       sessionVerified: true,
       offlineSessionId,
+      tokenSource: "authorization_header",
     };
   } catch (error) {
     rememberRejectedToken(shop, token);
 
-    logAuthDiagnosticOnce(`token_exchange_failure:${shop}:url_id_token`, () => {
-      logSessionPersistenceEvent("token_exchange_failure", shop, {
-        offlineSessionId,
-        bootstrap_decision: context.decision,
-        token_exchange_token_source: "url_id_token",
-        message: sanitizeErrorMessage(error),
-      });
-    });
+    logAuthDiagnosticOnce(
+      `token_exchange_failure:${shop}:authorization_header`,
+      () => {
+        logSessionPersistenceEvent("token_exchange_failure", shop, {
+          offlineSessionId,
+          bootstrap_decision: context.decision,
+          token_exchange_token_source: "authorization_header",
+          message: sanitizeErrorMessage(error),
+        });
+      },
+    );
 
     logBootstrapPhase(shop, "bootstrap_finished", {
       bootstrap_status: "failure",
       bootstrap_decision: context.decision,
+      token_exchange_token_source: "authorization_header",
       message: sanitizeErrorMessage(error),
     });
 
@@ -287,6 +308,7 @@ async function runBootstrapWork(
       decision: context.decision,
       sessionVerified: false,
       offlineSessionId,
+      tokenSource: "authorization_header",
     };
   }
 }
@@ -300,9 +322,10 @@ export async function bootstrapOfflineSessionIfNeeded(
   if (!shop) {
     return {
       status: "skipped",
-      decision: "skip_missing_id_token",
+      decision: "skip_missing_token",
       sessionVerified: false,
       offlineSessionId: null,
+      tokenSource: "missing",
     };
   }
 

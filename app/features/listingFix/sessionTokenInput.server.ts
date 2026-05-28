@@ -1,13 +1,16 @@
 const BOUNCE_REQUEST_HEADER = "X-Shopify-Bounce";
 const RETRY_INVALID_SESSION_HEADER = "X-Shopify-Retry-Invalid-Session-Request";
 
-export type SessionTokenSource = "url_id_token" | "missing";
+export type SessionTokenSource =
+  | "authorization_header"
+  | "url_id_token"
+  | "missing";
 
 export type BootstrapDecision =
   | "skip_existing_session"
-  | "bootstrap_from_url_id_token"
-  | "skip_bounce_request"
-  | "skip_missing_id_token";
+  | "bootstrap_from_authorization_header"
+  | "skip_url_id_token"
+  | "skip_missing_token";
 
 export type SessionTokenShape = {
   dotCount: number;
@@ -22,10 +25,12 @@ export type SessionTokenShape = {
 
 export type BootstrapRequestContext = {
   urlIdToken: string | null;
+  authorizationToken: string | null;
   hasAuthorizationHeader: boolean;
   isBounceRequest: boolean;
   decision: BootstrapDecision;
   token: string | null;
+  tokenSource: SessionTokenSource;
   shape: SessionTokenShape;
 };
 
@@ -73,6 +78,10 @@ export function isValidSessionTokenShape(token: string | null | undefined): bool
   return jwtSections.length === 3;
 }
 
+export function extractBearerSessionToken(request: Request): string | null {
+  return normalizeSessionToken(request.headers.get("authorization"));
+}
+
 export function extractUrlIdToken(request: Request): string | null {
   return normalizeSessionToken(
     new URL(request.url).searchParams.get("id_token"),
@@ -80,7 +89,7 @@ export function extractUrlIdToken(request: Request): string | null {
 }
 
 export function hasAuthorizationHeader(request: Request): boolean {
-  return Boolean(request.headers.get("authorization")?.match(/^Bearer\s+/i));
+  return extractBearerSessionToken(request) !== null;
 }
 
 export function isBounceRequest(request: Request): boolean {
@@ -99,9 +108,16 @@ export function isBounceRequest(request: Request): boolean {
     return true;
   }
 
-  // Shopify embed URLs include `session` on initial iframe loads too.
-  // Treat it as bounce only when the App Bridge bounce header is present.
   return searchParams.has("session") && request.headers.has(BOUNCE_REQUEST_HEADER);
+}
+
+export function hasEmbeddedContext(request: Request): boolean {
+  const url = new URL(request.url);
+  return (
+    url.searchParams.get("embedded") === "1" &&
+    Boolean(url.searchParams.get("shop")) &&
+    Boolean(url.searchParams.get("host"))
+  );
 }
 
 export function resolveBootstrapRequestContext(
@@ -109,49 +125,50 @@ export function resolveBootstrapRequestContext(
   hasExistingOfflineSession: boolean,
 ): BootstrapRequestContext {
   const urlIdToken = extractUrlIdToken(request);
-  const authorizationHeader = hasAuthorizationHeader(request);
+  const authorizationToken = extractBearerSessionToken(request);
   const bounceRequest = isBounceRequest(request);
-  const shape = describeSessionTokenShape(urlIdToken);
+  const baseContext = {
+    urlIdToken,
+    authorizationToken,
+    hasAuthorizationHeader: authorizationToken !== null,
+    isBounceRequest: bounceRequest,
+  };
 
   if (hasExistingOfflineSession) {
     return {
-      urlIdToken,
-      hasAuthorizationHeader: authorizationHeader,
-      isBounceRequest: bounceRequest,
+      ...baseContext,
       decision: "skip_existing_session",
       token: null,
-      shape,
+      tokenSource: "missing",
+      shape: describeSessionTokenShape(authorizationToken ?? urlIdToken),
     };
   }
 
-  if (bounceRequest && !urlIdToken) {
+  if (authorizationToken && isValidSessionTokenShape(authorizationToken)) {
     return {
-      urlIdToken,
-      hasAuthorizationHeader: authorizationHeader,
-      isBounceRequest: bounceRequest,
-      decision: "skip_bounce_request",
-      token: null,
-      shape,
+      ...baseContext,
+      decision: "bootstrap_from_authorization_header",
+      token: authorizationToken,
+      tokenSource: "authorization_header",
+      shape: describeSessionTokenShape(authorizationToken),
     };
   }
 
-  if (!urlIdToken || !isValidSessionTokenShape(urlIdToken)) {
+  if (urlIdToken) {
     return {
-      urlIdToken,
-      hasAuthorizationHeader: authorizationHeader,
-      isBounceRequest: bounceRequest,
-      decision: "skip_missing_id_token",
+      ...baseContext,
+      decision: "skip_url_id_token",
       token: null,
-      shape,
+      tokenSource: "url_id_token",
+      shape: describeSessionTokenShape(urlIdToken),
     };
   }
 
   return {
-    urlIdToken,
-    hasAuthorizationHeader: authorizationHeader,
-    isBounceRequest: bounceRequest,
-    decision: "bootstrap_from_url_id_token",
-    token: urlIdToken,
-    shape,
+    ...baseContext,
+    decision: "skip_missing_token",
+    token: null,
+    tokenSource: authorizationToken ? "authorization_header" : "missing",
+    shape: describeSessionTokenShape(authorizationToken),
   };
 }
