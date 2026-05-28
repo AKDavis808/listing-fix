@@ -1,5 +1,10 @@
 import { redirect } from "react-router";
 
+import {
+  appendSetCookieHeaders,
+  countSetCookieHeaders,
+  extractSetCookieHeaders,
+} from "./setCookieHeaders.server";
 import { logListingFixEvent } from "./telemetry";
 
 const OAUTH_IN_PROGRESS_COOKIE = "listingfix_oauth_in_progress";
@@ -34,18 +39,41 @@ export function buildClearOAuthInProgressCookie(): string {
   return `${OAUTH_IN_PROGRESS_COOKIE}=; Path=/; Max-Age=0; SameSite=None; Secure; HttpOnly`;
 }
 
-export function copySetCookieHeaders(source: Headers, target: Headers): void {
-  if (typeof source.getSetCookie === "function") {
-    for (const cookie of source.getSetCookie()) {
-      target.append("set-cookie", cookie);
-    }
-    return;
-  }
+export function copySetCookieHeaders(
+  source: Headers,
+  target: Headers,
+  explicitCookies?: string[],
+): void {
+  appendSetCookieHeaders(target, explicitCookies ?? extractSetCookieHeaders(source));
+}
 
-  const combined = source.get("set-cookie");
-  if (combined) {
-    target.append("set-cookie", combined);
-  }
+function logOAuthEscapeSetCookieCounts(
+  shop: string | null,
+  authBeginSetCookies: string[],
+  escapeHeaders: Headers,
+  strategy: "app_bridge_html" | "exit_iframe_redirect",
+): void {
+  logListingFixEvent({
+    action: "oauth_start",
+    shop,
+    meta: {
+      event: "oauth_escape_set_cookie_counts",
+      strategy,
+      auth_begin_set_cookie_count: authBeginSetCookies.length,
+      escape_response_set_cookie_count: authBeginSetCookies.length + 1,
+      final_auth_response_set_cookie_count: countSetCookieHeaders(escapeHeaders),
+    },
+  });
+}
+
+function buildEscapeResponseHeaders(
+  beginSetCookies: string[],
+  extraHeaders: Record<string, string> = {},
+): Headers {
+  const headers = new Headers(extraHeaders);
+  appendSetCookieHeaders(headers, beginSetCookies);
+  headers.append("set-cookie", buildOAuthInProgressCookie());
+  return headers;
 }
 
 function extractEmbeddedContext(request: Request) {
@@ -149,6 +177,7 @@ export function throwEmbeddedOAuthTopLevelEscape(
   request: Request,
   beginResponse: Response,
   shop: string,
+  beginSetCookies: string[],
 ): never {
   const authorizeUrl = beginResponse.headers.get("location");
 
@@ -161,13 +190,17 @@ export function throwEmbeddedOAuthTopLevelEscape(
   logOAuthEscapeTopLevelStarted(request, shop, authorizeUrl, "app_bridge_html");
 
   const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
-  const headers = new Headers({
+  const headers = buildEscapeResponseHeaders(beginSetCookies, {
     "content-type": "text/html;charset=utf-8",
   });
-
-  copySetCookieHeaders(beginResponse.headers, headers);
-  headers.append("set-cookie", buildOAuthInProgressCookie());
   headers.set("Content-Security-Policy", buildEmbeddedFrameAncestorsCsp(shop));
+
+  logOAuthEscapeSetCookieCounts(
+    shop,
+    beginSetCookies,
+    headers,
+    "app_bridge_html",
+  );
 
   throw new Response(buildAppBridgeEscapeHtml(apiKey, authorizeUrl), {
     status: 200,
@@ -179,6 +212,7 @@ export function throwEmbeddedOAuthExitIframeRedirect(
   request: Request,
   beginResponse: Response,
   shop: string,
+  beginSetCookies: string[],
 ): never {
   const url = new URL(request.url);
   const host = url.searchParams.get("host");
@@ -208,9 +242,14 @@ export function throwEmbeddedOAuthExitIframeRedirect(
   });
   const exitIframeUrl = `${EXIT_IFRAME_PATH}?${exitParams.toString()}`;
 
-  const headers = new Headers();
-  copySetCookieHeaders(beginResponse.headers, headers);
-  headers.append("set-cookie", buildOAuthInProgressCookie());
+  const headers = buildEscapeResponseHeaders(beginSetCookies);
+
+  logOAuthEscapeSetCookieCounts(
+    shop,
+    beginSetCookies,
+    headers,
+    "exit_iframe_redirect",
+  );
 
   throw redirect(exitIframeUrl, { headers });
 }
@@ -219,8 +258,14 @@ export function escapeEmbeddedOAuthBegin(
   request: Request,
   beginResponse: Response,
   shop: string,
+  beginSetCookies: string[],
 ): never {
-  throwEmbeddedOAuthTopLevelEscape(request, beginResponse, shop);
+  throwEmbeddedOAuthTopLevelEscape(
+    request,
+    beginResponse,
+    shop,
+    beginSetCookies,
+  );
 }
 
 export function shouldEscapeEmbeddedOAuthBegin(request: Request): boolean {

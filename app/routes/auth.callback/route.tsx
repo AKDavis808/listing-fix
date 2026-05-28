@@ -1,5 +1,6 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { boundary } from "@shopify/shopify-app-react-router/server";
+
+import { authRouteHeaders } from "../../features/listingFix/authResponseHeaders.server";
 
 import {
   buildOAuthCallbackErrorResponse,
@@ -48,5 +49,5 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
+  return authRouteHeaders(headersArgs);
 };

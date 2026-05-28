@@ -29,6 +29,10 @@ import {
 } from "./embeddedOAuthEscape.server";
 import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
 import {
+  countSetCookieHeaders,
+  extractSetCookieHeaders,
+} from "./setCookieHeaders.server";
+import {
   logAuthRouteEntered,
   logOAuthRouteEntered,
 } from "./oauthSessionDiagnostics.server";
@@ -235,15 +239,32 @@ export async function handleOAuthAuthRoute(
       callbackPath: deps.authCallbackPath,
     });
 
-    const beginResponse = applyEmbeddedOAuthCookiePolicy(
-      (await listingFixShopifyApi.auth.begin({
-        shop,
-        callbackPath: deps.authCallbackPath,
-        isOnline: false,
-        rawRequest: request,
-      })) as Response,
-      request,
+    const rawBeginResponse = (await listingFixShopifyApi.auth.begin({
+      shop,
+      callbackPath: deps.authCallbackPath,
+      isOnline: false,
+      rawRequest: request,
+    })) as Response;
+
+    const authBeginSetCookieCount = countSetCookieHeaders(
+      rawBeginResponse.headers,
     );
+
+    const { response: beginResponse, setCookies } =
+      applyEmbeddedOAuthCookiePolicy(rawBeginResponse, request);
+
+    logListingFixEvent({
+      action: "oauth_start",
+      shop,
+      meta: {
+        event: "oauth_begin_set_cookie_counts",
+        auth_begin_set_cookie_count: authBeginSetCookieCount,
+        policy_set_cookie_count: setCookies.length,
+        rawSetCookieNames: extractSetCookieHeaders(rawBeginResponse.headers)
+          .map((cookie) => cookie.split("=")[0])
+          .join(","),
+      },
+    });
 
     logOAuthBeginResponse(
       request,
@@ -253,7 +274,7 @@ export async function handleOAuthAuthRoute(
     );
 
     if (shouldEscapeEmbeddedOAuthBegin(request)) {
-      escapeEmbeddedOAuthBegin(request, beginResponse, shop);
+      escapeEmbeddedOAuthBegin(request, beginResponse, shop, setCookies);
     }
 
     return beginResponse;
