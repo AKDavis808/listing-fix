@@ -1,6 +1,7 @@
 import { redirect } from "react-router";
 
 import {
+  logOAuthBeginResponse,
   logOAuthCallbackQuery,
   logOAuthCallbackValidationSuccess,
 } from "./oauthCallbackDiagnostics.server";
