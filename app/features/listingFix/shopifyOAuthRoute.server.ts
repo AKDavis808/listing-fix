@@ -3,6 +3,7 @@ import { redirect } from "react-router";
 import {
   logAuthCallbackCompleted,
   logAuthRouteEntered,
+  logAfterAuthPhase,
   logOAuthCallbackError,
   logOAuthRouteEntered,
 } from "./oauthSessionDiagnostics.server";
@@ -14,13 +15,16 @@ import {
   logOAuthCallbackValidationSuccess,
 } from "./oauthCallbackDiagnostics.server";
 import { listingFixShopifyApi } from "./shopifyApi.server";
-import { getOfflineSessionId } from "./sessionPersistence.server";
+import { getOfflineSessionId, verifyPrismaSessionPersisted } from "./sessionPersistence.server";
 
 type OAuthRouteDeps = {
   appUrl: string;
   authCallbackPath: string;
   expiringOfflineAccessTokens: boolean;
-  runAfterAuth: (session: import("@shopify/shopify-api").Session) => Promise<void>;
+  runAfterAuth: (
+    session: import("@shopify/shopify-api").Session,
+    options?: { storeSessionAlreadyCompleted?: boolean },
+  ) => Promise<void>;
   sessionStorage: {
     storeSession: (
       session: import("@shopify/shopify-api").Session,
@@ -92,8 +96,26 @@ export async function handleOAuthCallbackRoute(
 
     logOAuthCallbackValidationSuccess(session.shop);
 
+    logAfterAuthPhase("afterAuth_before_storeSession", session, {
+      route: "oauth.callback",
+    });
+
     await deps.sessionStorage.storeSession(session);
-    await deps.runAfterAuth(session);
+
+    const prismaVerified = await verifyPrismaSessionPersisted(session);
+
+    logAfterAuthPhase("afterAuth_after_storeSession", session, {
+      prismaVerified,
+      offlineSessionPersisted: prismaVerified,
+      expectedOfflineSessionId: getOfflineSessionId(session.shop),
+      offlineIdMatches: session.id === getOfflineSessionId(session.shop),
+    });
+
+    try {
+      await deps.runAfterAuth(session, { storeSessionAlreadyCompleted: true });
+    } catch (afterAuthError) {
+      logOAuthCallbackError(session.shop, afterAuthError);
+    }
 
     logAuthCallbackCompleted(session.shop, {
       sessionId: session.id,

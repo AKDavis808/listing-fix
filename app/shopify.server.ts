@@ -7,22 +7,20 @@ import {
 import type { Session } from "@shopify/shopify-api";
 
 import prisma from "./db.server";
+import { runAfterAuthPipeline } from "./features/listingFix/afterAuthPipeline.server";
 import { logAuthDiagnosticOnce } from "./features/listingFix/authDiagnostics.server";
 import {
   authenticateEmbeddedAdmin,
   loginWithEmbeddedContext,
   normalizeShopifyAppUrl,
 } from "./features/listingFix/embeddedAuth.server";
+import { logStartupUrlConfigDiagnostic } from "./features/listingFix/oauthCallbackDiagnostics.server";
 import {
-  logAfterAuthFinished,
-  logAfterAuthStart,
   logAuthRouteWiringDiagnostic,
   logStartupSessionDiagnostics,
 } from "./features/listingFix/oauthSessionDiagnostics.server";
-import { logStartupUrlConfigDiagnostic } from "./features/listingFix/oauthCallbackDiagnostics.server";
 import { InstrumentedPrismaSessionStorage } from "./features/listingFix/prismaSessionStorage.server";
 import { handleOAuthAuthRoute } from "./features/listingFix/shopifyOAuthRoute.server";
-import { verifyPrismaSessionPersisted } from "./features/listingFix/sessionPersistence.server";
 
 export const AUTH_PATH_PREFIX = "/auth";
 export const AUTH_CALLBACK_PATH = `${AUTH_PATH_PREFIX}/callback`;
@@ -60,12 +58,25 @@ void logStartupSessionDiagnostics();
 logAuthRouteWiringDiagnostic(appUrl, distribution);
 logStartupUrlConfigDiagnostic(appUrl, AUTH_CALLBACK_PATH, apiKey, scopes);
 
-export async function runListingFixAfterAuth(session: Session): Promise<void> {
-  logAfterAuthStart(session);
+type AfterAuthHookOptions = {
+  session: Session;
+  admin?: unknown;
+};
 
-  const prismaVerified = await verifyPrismaSessionPersisted(session);
-
-  logAfterAuthFinished(session, prismaVerified, true);
+export async function runListingFixAfterAuth(
+  session: Session,
+  options: {
+    admin?: unknown;
+    registerWebhooks?: (options: { session: Session }) => Promise<unknown>;
+    storeSessionAlreadyCompleted?: boolean;
+  } = {},
+): Promise<void> {
+  await runAfterAuthPipeline({
+    session,
+    admin: options.admin,
+    registerWebhooks: options.registerWebhooks,
+    storeSessionAlreadyCompleted: options.storeSessionAlreadyCompleted,
+  });
 }
 
 const shopify = shopifyApp({
@@ -82,8 +93,12 @@ const shopify = shopifyApp({
     expiringOfflineAccessTokens,
   },
   hooks: {
-    afterAuth: async ({ session }) => {
-      await runListingFixAfterAuth(session);
+    afterAuth: async ({ session, admin }: AfterAuthHookOptions) => {
+      await runListingFixAfterAuth(session, {
+        admin,
+        registerWebhooks: (opts) => shopify.registerWebhooks(opts),
+        storeSessionAlreadyCompleted: true,
+      });
     },
   },
   ...(process.env.SHOP_CUSTOM_DOMAIN

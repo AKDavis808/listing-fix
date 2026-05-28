@@ -175,6 +175,81 @@ export function logAfterAuthFinished(
   });
 }
 
+export function logAfterAuthPhase(
+  event:
+    | "afterAuth_start"
+    | "afterAuth_before_storeSession"
+    | "afterAuth_after_storeSession"
+    | "afterAuth_before_webhooks"
+    | "afterAuth_after_webhooks"
+    | "afterAuth_complete",
+  session: Session,
+  meta?: Record<string, string | number | boolean | null | undefined>,
+): void {
+  const expectedOfflineSessionId = getOfflineSessionId(session.shop);
+
+  logListingFixEvent({
+    action: event === "afterAuth_complete" ? "oauth_complete" : "oauth_start",
+    shop: session.shop,
+    meta: {
+      event,
+      afterAuth_shop: session.shop,
+      afterAuth_session_id: session.id,
+      afterAuth_isOnline: session.isOnline,
+      afterAuth_accessToken_present: Boolean(session.accessToken),
+      expectedOfflineSessionId,
+      offlineIdMatches: session.id === expectedOfflineSessionId,
+      ...meta,
+    },
+  });
+}
+
+export function logAfterAuthWebhookFailure(
+  session: Session,
+  error: unknown,
+  meta?: Record<string, string | number | boolean | null | undefined>,
+): void {
+  logListingFixEvent({
+    action: "session_missing",
+    shop: session.shop,
+    message: error,
+    meta: {
+      event: "afterAuth_webhook_registration_failed",
+      message: sanitizeErrorMessage(error),
+      adminClientAvailable: meta?.adminClientAvailable,
+      ...meta,
+    },
+  });
+}
+
+export function logAfterAuthWebhookSuccess(
+  session: Session,
+  meta?: Record<string, string | number | boolean | null | undefined>,
+): void {
+  logListingFixEvent({
+    action: "oauth_complete",
+    shop: session.shop,
+    meta: {
+      event: "afterAuth_after_webhooks",
+      ...meta,
+    },
+  });
+}
+
+export function logAppAuthenticateSuccess(shop: string, sessionId: string): void {
+  logListingFixEvent({
+    action: "session_restored",
+    shop,
+    meta: {
+      event: "authenticate_admin_success",
+      sessionId,
+      expectedOfflineSessionId: getOfflineSessionId(shop),
+      offlineIdMatches: sessionId === getOfflineSessionId(shop),
+      appRoute: "GET /app",
+    },
+  });
+}
+
 export function logOAuthCallbackError(shop: string | null, error: unknown): void {
   logListingFixEvent({
     action: "session_missing",

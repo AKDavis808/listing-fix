@@ -18,6 +18,7 @@ import {
 } from "../components/listingFix/ListingFixFeedback";
 import { ListingFixTelemetryBootstrap } from "../components/listingFix/ListingFixTelemetryBootstrap";
 import { ensureOfflineSessionOrRedirectToOAuth } from "../features/listingFix/oauthRedirect.server";
+import { logAppAuthenticateSuccess } from "../features/listingFix/oauthSessionDiagnostics.server";
 import { logListingFixEvent } from "../features/listingFix/telemetry";
 import { authenticateAdminRaw } from "../shopify.server";
 
@@ -25,6 +26,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   await ensureOfflineSessionOrRedirectToOAuth(request, "app_missing_offline_session");
 
   const { session } = await authenticateAdminRaw(request);
+
+  logAppAuthenticateSuccess(session.shop, session.id);
+
+  logListingFixEvent({
+    action: "session_restored",
+    shop: session.shop,
+    meta: {
+      event: "app_loader_success",
+      method: request.method,
+      pathname: new URL(request.url).pathname,
+      status: 200,
+    },
+  });
 
   // eslint-disable-next-line no-undef
   return { apiKey: process.env.SHOPIFY_API_KEY || "", shop: session.shop };
