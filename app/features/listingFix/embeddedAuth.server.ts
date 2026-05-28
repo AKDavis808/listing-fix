@@ -171,13 +171,248 @@ export function renderSessionTokenBouncePage(request: Request): never {
   <body>
     <script>
       (function () {
+        var REAUTH_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
+        var pageParams = new URLSearchParams(location.search);
+        var shopifyReload = pageParams.get("shopify-reload");
+        var appOrigin = location.origin;
+
         function logError(reason) {
           console.log("session_token_error", reason);
         }
 
+        function isOAuthInstallUrl(urlString) {
+          try {
+            var parsed = new URL(urlString, appOrigin);
+            return (
+              parsed.hostname === "admin.shopify.com" ||
+              parsed.pathname.indexOf("/oauth/install") !== -1
+            );
+          } catch (error) {
+            return /admin\\.shopify\\.com|oauth\\/install/.test(String(urlString));
+          }
+        }
+
+        function isSameOriginAppAuthPath(urlString) {
+          try {
+            var parsed = new URL(urlString, appOrigin);
+            if (parsed.origin !== appOrigin) return false;
+            return /^\\/auth\\/(login|callback|session-token)/.test(parsed.pathname);
+          } catch (error) {
+            return false;
+          }
+        }
+
+        function navigateTop(url, reason) {
+          console.log("session_token_oauth_redirect_detected", {
+            url: url,
+            reason: reason,
+          });
+          console.log("session_token_top_navigation_start", url);
+          var target = window.top && window.top !== window ? window.top : window;
+          target.location.href = url;
+        }
+
+        function resolveNavigationTarget(response, reloadUrl) {
+          var reauthUrl = response.headers.get(REAUTH_HEADER);
+          if (reauthUrl) {
+            return { url: reauthUrl, reason: "reauth_header" };
+          }
+
+          if (response.url && isOAuthInstallUrl(response.url)) {
+            return { url: response.url, reason: "response_url" };
+          }
+
+          if (response.status >= 300 && response.status < 400) {
+            var locationHeader = response.headers.get("Location");
+            if (locationHeader) {
+              var redirectUrl = new URL(locationHeader, reloadUrl.href).href;
+              if (
+                isOAuthInstallUrl(redirectUrl) ||
+                isSameOriginAppAuthPath(redirectUrl)
+              ) {
+                return {
+                  url: redirectUrl,
+                  reason: "redirect_" + response.status,
+                };
+              }
+              try {
+                if (new URL(redirectUrl).origin !== appOrigin) {
+                  return {
+                    url: redirectUrl,
+                    reason: "cross_origin_redirect_" + response.status,
+                  };
+                }
+              } catch (error) {
+                return { url: redirectUrl, reason: "redirect_parse_fallback" };
+              }
+            }
+          }
+
+          if (response.status === 401) {
+            return { url: null, reason: "unauthorized_without_reauth_url" };
+          }
+
+          if (response.type === "opaqueredirect") {
+            return { url: reloadUrl.href, reason: "opaque_redirect" };
+          }
+
+          return null;
+        }
+
+        async function writeSameOriginHtml(response, reloadUrl) {
+          console.log("session_token_same_origin_html_received", {
+            status: response.status,
+          });
+
+          if (document.documentElement) {
+            document.documentElement.remove();
+          }
+          reloadUrl.searchParams.delete("shopify-reload");
+          history.replaceState(
+            null,
+            "",
+            reloadUrl.pathname +
+              (reloadUrl.search ? reloadUrl.search : "") +
+              reloadUrl.hash,
+          );
+
+          if (
+            response.body &&
+            typeof TextDecoderStream !== "undefined" &&
+            typeof response.body.pipeThrough === "function"
+          ) {
+            var reader = response.body
+              .pipeThrough(new TextDecoderStream())
+              .getReader();
+            for (;;) {
+              var chunk = await reader.read();
+              if (chunk.done) break;
+              document.write(chunk.value);
+            }
+          } else {
+            document.write(await response.text());
+          }
+
+          document.close();
+        }
+
+        async function performBounceReload() {
+          if (!shopifyReload) {
+            logError("missing_shopify_reload");
+            return;
+          }
+
+          if (!window.shopify || typeof window.shopify.idToken !== "function") {
+            logError("shopify_id_token_unavailable");
+            return;
+          }
+
+          var reloadUrl;
+          try {
+            reloadUrl = new URL(shopifyReload, appOrigin);
+          } catch (error) {
+            logError("invalid_shopify_reload");
+            return;
+          }
+
+          if (reloadUrl.origin !== appOrigin) {
+            logError("shopify_reload_not_same_origin");
+            return;
+          }
+
+          console.log("session_token_requested");
+          var token;
+          try {
+            token = await window.shopify.idToken();
+            console.log("session_token_received");
+          } catch (error) {
+            logError(String(error));
+            return;
+          }
+
+          console.log("session_token_reload_start", reloadUrl.href);
+
+          var response;
+          try {
+            response = await fetch(reloadUrl.href, {
+              method: "GET",
+              mode: "same-origin",
+              credentials: "same-origin",
+              redirect: "manual",
+              headers: {
+                Accept: "text/html",
+                Authorization: "Bearer " + token,
+                "X-Shopify-Bounce": "1",
+              },
+            });
+          } catch (error) {
+            logError(String(error));
+            return;
+          }
+
+          console.log("session_token_received", {
+            status: response.status,
+            ok: response.ok,
+            type: response.type,
+            url: response.url,
+          });
+
+          var navigationTarget = resolveNavigationTarget(response, reloadUrl);
+          if (navigationTarget && navigationTarget.url) {
+            navigateTop(navigationTarget.url, navigationTarget.reason);
+            return;
+          }
+
+          if (
+            navigationTarget &&
+            navigationTarget.reason === "unauthorized_without_reauth_url"
+          ) {
+            logError(navigationTarget.reason);
+            return;
+          }
+
+          var contentType = (response.headers.get("content-type") || "").trim();
+          if (response.ok && /^text\\/html(\\s*;|$)/i.test(contentType)) {
+            try {
+              await writeSameOriginHtml(response, reloadUrl);
+            } catch (error) {
+              logError(String(error));
+            }
+            return;
+          }
+
+          logError("unexpected_bounce_response_" + response.status);
+        }
+
+        function startBounceReloadWhenReady() {
+          var attempts = 0;
+          var timer = setInterval(function () {
+            attempts += 1;
+            if (window.shopify && typeof window.shopify.idToken === "function") {
+              clearInterval(timer);
+              performBounceReload().catch(function (error) {
+                logError(String(error));
+              });
+            } else if (attempts > 200) {
+              clearInterval(timer);
+              logError("shopify_global_timeout");
+            }
+          }, 50);
+        }
+
+        if (shopifyReload) {
+          pageParams.delete("shopify-reload");
+          var cleanedSearch = pageParams.toString();
+          history.replaceState(
+            null,
+            "",
+            location.pathname + (cleanedSearch ? "?" + cleanedSearch : ""),
+          );
+        }
+
         console.log("session_token_page_loaded", {
           href: location.href,
-          shopifyReload: new URLSearchParams(location.search).get("shopify-reload"),
+          shopifyReload: shopifyReload,
         });
 
         window.addEventListener("error", function (event) {
@@ -187,52 +422,14 @@ export function renderSessionTokenBouncePage(request: Request): never {
           logError(String(event.reason));
         });
 
-        function installFetchLogging() {
-          var originalFetch = window.fetch;
-          if (!originalFetch) return;
-
-          window.fetch = function (input, init) {
-            var requestInit = init || {};
-            var headers = requestInit.headers;
-            var headerLookup = function (name) {
-              if (!headers) return null;
-              if (typeof headers.get === "function") return headers.get(name);
-              return headers[name] || headers[name.toLowerCase()] || null;
-            };
-
-            if (headerLookup("Authorization")) {
-              console.log("session_token_requested");
-            }
-            if (headerLookup("X-Shopify-Bounce")) {
-              console.log("session_token_reload_start", String(input));
-            }
-
-            return originalFetch.call(this, input, init).then(
-              function (response) {
-                if (headerLookup("X-Shopify-Bounce")) {
-                  console.log("session_token_received", {
-                    status: response.status,
-                    ok: response.ok,
-                  });
-                }
-                return response;
-              },
-              function (error) {
-                logError(String(error));
-                throw error;
-              },
-            );
-          };
-        }
-
-        installFetchLogging();
-
         var appBridgeScript = document.getElementById("listingfix-app-bridge");
         if (appBridgeScript) {
-          appBridgeScript.addEventListener("load", installFetchLogging);
+          appBridgeScript.addEventListener("load", startBounceReloadWhenReady);
           appBridgeScript.addEventListener("error", function () {
             logError("app_bridge_script_failed");
           });
+        } else {
+          startBounceReloadWhenReady();
         }
       })();
     </script>
