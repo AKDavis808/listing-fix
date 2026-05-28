@@ -167,14 +167,75 @@ export function renderSessionTokenBouncePage(request: Request): never {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>ListingFix session token</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        background: #f6f6f7;
+        color: #202223;
+      }
+      #listingfix-reconnect {
+        box-sizing: border-box;
+        max-width: 420px;
+        margin: 48px auto;
+        padding: 24px;
+        background: #ffffff;
+        border: 1px solid #e1e3e5;
+        border-radius: 12px;
+        box-shadow: 0 1px 0 rgba(0, 0, 0, 0.05);
+      }
+      #listingfix-reconnect[hidden] {
+        display: none;
+      }
+      #listingfix-reconnect h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+      #listingfix-reconnect p {
+        margin: 0 0 20px;
+        font-size: 14px;
+        line-height: 1.5;
+        color: #6d7175;
+      }
+      #listingfix-reconnect-button {
+        appearance: none;
+        border: none;
+        border-radius: 8px;
+        background: #008060;
+        color: #ffffff;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1;
+        padding: 10px 16px;
+      }
+      #listingfix-reconnect-button:hover {
+        background: #006e52;
+      }
+      #listingfix-reconnect-button:focus-visible {
+        outline: 2px solid #005bd3;
+        outline-offset: 2px;
+      }
+    </style>
   </head>
   <body>
+    <div id="listingfix-reconnect" hidden>
+      <h1>Reconnect ListingFix</h1>
+      <p>Shopify needs to refresh your app connection.</p>
+      <button type="button" id="listingfix-reconnect-button">
+        Reconnect in Shopify
+      </button>
+    </div>
     <script>
       (function () {
         var REAUTH_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
         var pageParams = new URLSearchParams(location.search);
         var shopifyReload = pageParams.get("shopify-reload");
         var appOrigin = location.origin;
+        var pendingReconnectUrl = null;
 
         function logError(reason) {
           console.log("session_token_error", reason);
@@ -202,6 +263,15 @@ export function renderSessionTokenBouncePage(request: Request): never {
           }
         }
 
+        function requiresUserAction(urlString) {
+          if (isOAuthInstallUrl(urlString)) return true;
+          try {
+            return new URL(urlString, appOrigin).origin !== appOrigin;
+          } catch (error) {
+            return true;
+          }
+        }
+
         function navigateTop(url, reason) {
           console.log("session_token_oauth_redirect_detected", {
             url: url,
@@ -210,6 +280,42 @@ export function renderSessionTokenBouncePage(request: Request): never {
           console.log("session_token_top_navigation_start", url);
           var target = window.top && window.top !== window ? window.top : window;
           target.location.href = url;
+        }
+
+        function showReconnectPrompt(url, reason) {
+          pendingReconnectUrl = url;
+          console.log("session_token_oauth_redirect_detected", {
+            url: url,
+            reason: reason,
+          });
+          console.log("session_token_user_action_required", {
+            url: url,
+            reason: reason,
+          });
+
+          var panel = document.getElementById("listingfix-reconnect");
+          var button = document.getElementById("listingfix-reconnect-button");
+          if (!panel || !button) {
+            logError("reconnect_ui_missing");
+            return;
+          }
+
+          panel.hidden = false;
+          button.onclick = function () {
+            console.log("session_token_reconnect_clicked", pendingReconnectUrl);
+            console.log("session_token_top_navigation_start", pendingReconnectUrl);
+            var target =
+              window.top && window.top !== window ? window.top : window;
+            target.location.href = pendingReconnectUrl;
+          };
+        }
+
+        function handleNavigationTarget(url, reason) {
+          if (requiresUserAction(url)) {
+            showReconnectPrompt(url, reason);
+            return;
+          }
+          navigateTop(url, reason);
         }
 
         function resolveNavigationTarget(response, reloadUrl) {
@@ -359,7 +465,10 @@ export function renderSessionTokenBouncePage(request: Request): never {
 
           var navigationTarget = resolveNavigationTarget(response, reloadUrl);
           if (navigationTarget && navigationTarget.url) {
-            navigateTop(navigationTarget.url, navigationTarget.reason);
+            handleNavigationTarget(
+              navigationTarget.url,
+              navigationTarget.reason,
+            );
             return;
           }
 
