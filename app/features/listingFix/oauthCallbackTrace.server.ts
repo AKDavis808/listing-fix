@@ -14,6 +14,7 @@ import {
   classifyOAuthCallbackError,
   logOAuthCallbackValidationFailure,
 } from "./oauthCallbackDiagnostics.server";
+import type { OAuthCallbackPreValidation } from "./oauthCallbackPreValidation.server";
 import { STATE_COOKIE_NAME } from "./oauthCookiePolicy.server";
 import { recordAuthFlowStep } from "./authFlowTelemetry.server";
 import {
@@ -30,6 +31,17 @@ function getCookieNames(cookieHeader: string | null): string[] {
     .split(";")
     .map((part) => part.trim().split("=")[0])
     .filter(Boolean);
+}
+
+function countCookieOccurrences(
+  cookieHeader: string | null,
+  name: string,
+): number {
+  if (!cookieHeader) return 0;
+
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(?:^|;\\s*)${escaped}=`, "g");
+  return cookieHeader.match(pattern)?.length ?? 0;
 }
 
 function extractErrorStack(error: unknown): string | undefined {
@@ -107,6 +119,7 @@ export function logOAuthCallbackCookieDiagnostics(
   request: Request,
   shop: string | null,
   error: unknown,
+  preValidation?: OAuthCallbackPreValidation | null,
 ): void {
   const cookieHeader = request.headers.get("cookie");
   const cookieNames = getCookieNames(cookieHeader);
@@ -114,6 +127,10 @@ export function logOAuthCallbackCookieDiagnostics(
 
   const url = new URL(request.url);
   const queryState = url.searchParams.get("state");
+  const duplicateStateCookieCount = countCookieOccurrences(
+    cookieHeader,
+    STATE_COOKIE_NAME,
+  );
 
   logListingFixEvent({
     action: "session_missing",
@@ -127,14 +144,22 @@ export function logOAuthCallbackCookieDiagnostics(
       callbackCookieHeaderPresent: Boolean(cookieHeader),
       callbackStateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
       oauth_callback_state_query: queryState,
+      duplicate_state_cookie_detected: duplicateStateCookieCount > 1,
+      duplicate_state_cookie_count: duplicateStateCookieCount,
       oauthBeginSetCookies: beginSnapshot?.setCookies.join(" | ") ?? null,
       oauthBeginSetCookieCount: beginSnapshot?.setCookies.length ?? 0,
       oauthBeginSnapshotAgeMs: beginSnapshot
         ? Date.now() - beginSnapshot.capturedAt
         : null,
-      likelyDuplicateStateCookie:
-        error instanceof InvalidOAuthError &&
-        cookieNames.includes(STATE_COOKIE_NAME),
+      callback_hmac_valid: preValidation?.callback_hmac_valid ?? null,
+      callback_hmac_expected_prefix:
+        preValidation?.callback_hmac_expected_prefix ?? null,
+      callback_hmac_received_prefix:
+        preValidation?.callback_hmac_received_prefix ?? null,
+      callback_state_matches_cookie:
+        preValidation?.callback_state_matches_cookie ?? null,
+      callback_hmac_validation_error:
+        preValidation?.callback_hmac_validation_error ?? null,
       message: formatOAuthCallbackErrorMessage(error),
       errorStack: extractErrorStack(error),
     },
@@ -211,8 +236,9 @@ export function logOAuthCallbackUnhandledFailure(
   shop: string | null,
   error: unknown,
   request: Request,
+  preValidation?: OAuthCallbackPreValidation | null,
 ): void {
-  logOAuthCallbackValidationFailure(shop, error);
+  logOAuthCallbackValidationFailure(shop, error, preValidation);
   logOAuthCallbackError(shop, error);
 
   if (
@@ -220,7 +246,7 @@ export function logOAuthCallbackUnhandledFailure(
     error instanceof InvalidOAuthError ||
     error instanceof InvalidHmacError
   ) {
-    logOAuthCallbackCookieDiagnostics(request, shop, error);
+    logOAuthCallbackCookieDiagnostics(request, shop, error, preValidation);
   }
 
   logListingFixEvent({
@@ -233,6 +259,17 @@ export function logOAuthCallbackUnhandledFailure(
       message: formatOAuthCallbackErrorMessage(error),
       errorStack: extractErrorStack(error),
       httpStatus: oauthCallbackHttpStatus(error),
+      callback_hmac_valid: preValidation?.callback_hmac_valid ?? null,
+      callback_hmac_expected_prefix:
+        preValidation?.callback_hmac_expected_prefix ?? null,
+      callback_hmac_received_prefix:
+        preValidation?.callback_hmac_received_prefix ?? null,
+      callback_state_matches_cookie:
+        preValidation?.callback_state_matches_cookie ?? null,
+      redirect_uri_matches_expected:
+        preValidation?.redirect_uri_matches_expected ?? null,
+      configured_api_key_matches_toml_client_id:
+        preValidation?.configured_api_key_matches_toml_client_id ?? null,
     },
   });
 }

@@ -6,11 +6,14 @@ import {
 } from "@shopify/shopify-api";
 
 import {
-  applyEmbeddedOAuthCookiePolicy,
   EMBEDDED_OAUTH_COOKIE_PATH,
   logCallbackCookiePresence,
   STATE_COOKIE_NAME,
 } from "./oauthCookiePolicy.server";
+import type { OAuthCallbackPreValidation } from "./oauthCallbackPreValidation.server";
+import {
+  EXPECTED_TOML_CLIENT_ID,
+} from "./oauthCallbackPreValidation.server";
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
 const EXPECTED_PRODUCTION_APP_URL =
@@ -50,6 +53,11 @@ export function logStartupUrlConfigDiagnostic(
         : null,
       hasApiKey: Boolean(apiKey),
       apiKeyLength: apiKey.length,
+      apiKeyPrefix: apiKey ? apiKey.slice(0, 8) : null,
+      expectedTomlClientIdPrefix: EXPECTED_TOML_CLIENT_ID.slice(0, 8),
+      apiKeyMatchesTomlClientId: apiKey === EXPECTED_TOML_CLIENT_ID,
+      shopifyApiSecretPresent: Boolean(process.env.SHOPIFY_API_SECRET?.trim()),
+      shopifyApiSecretLength: process.env.SHOPIFY_API_SECRET?.trim().length ?? null,
       scopes: scopes?.join(",") ?? null,
       partnerAllowedRedirectUrls: [
         EXPECTED_REDIRECT_URL,
@@ -195,7 +203,18 @@ export function classifyOAuthCallbackError(error: unknown): string {
 export function logOAuthCallbackValidationFailure(
   shop: string | null,
   error: unknown,
+  preValidation?: OAuthCallbackPreValidation | null,
 ): void {
+  const hmacFailure =
+    preValidation?.callback_hmac_valid === false ||
+    error instanceof InvalidHmacError;
+  const stateFailure =
+    preValidation?.callback_state_matches_cookie === false ||
+    error instanceof CookieNotFound;
+  const configFailure =
+    preValidation?.redirect_uri_matches_expected === false ||
+    preValidation?.configured_api_key_matches_toml_client_id === false;
+
   logListingFixEvent({
     action: "session_missing",
     shop,
@@ -204,10 +223,23 @@ export function logOAuthCallbackValidationFailure(
       event: "oauth_callback_validation_failure",
       failureType: classifyOAuthCallbackError(error),
       message: sanitizeErrorMessage(error),
-      stateValidationFailure:
-        error instanceof InvalidOAuthError ||
-        error instanceof CookieNotFound,
+      stateValidationFailure: stateFailure,
+      hmacValidationFailure: hmacFailure,
       cookieValidationFailure: error instanceof CookieNotFound,
+      configValidationFailure: configFailure,
+      callback_hmac_valid: preValidation?.callback_hmac_valid ?? null,
+      callback_hmac_expected_prefix:
+        preValidation?.callback_hmac_expected_prefix ?? null,
+      callback_hmac_received_prefix:
+        preValidation?.callback_hmac_received_prefix ?? null,
+      callback_state_matches_cookie:
+        preValidation?.callback_state_matches_cookie ?? null,
+      duplicate_state_cookie_detected:
+        preValidation?.duplicate_state_cookie_detected ?? null,
+      redirect_uri_matches_expected:
+        preValidation?.redirect_uri_matches_expected ?? null,
+      configured_api_key_matches_toml_client_id:
+        preValidation?.configured_api_key_matches_toml_client_id ?? null,
     },
   });
 }

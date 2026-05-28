@@ -1,10 +1,13 @@
 import { redirect } from "react-router";
 
 import {
-  logOAuthBeginResponse,
   logOAuthCallbackQuery,
   logOAuthCallbackValidationSuccess,
 } from "./oauthCallbackDiagnostics.server";
+import {
+  logOAuthCallbackPreValidation,
+  runOAuthCallbackPreValidation,
+} from "./oauthCallbackPreValidation.server";
 import {
   buildOAuthCallbackErrorResponse,
   clearOAuthBeginCookieSnapshot,
@@ -133,7 +136,27 @@ export async function handleOAuthCallbackRoute(
     );
   }
 
+  let preValidation: Awaited<
+    ReturnType<typeof runOAuthCallbackPreValidation>
+  > | null = null;
+
   try {
+    preValidation = await runOAuthCallbackPreValidation(request, {
+      appUrl: deps.appUrl,
+      authCallbackPath: deps.authCallbackPath,
+    });
+    logOAuthCallbackPreValidation(request, preValidation);
+    recordAuthFlowStep(request, "oauth_callback_pre_validation", {
+      shop: preValidation.callback_shop,
+      callback_hmac_valid: preValidation.callback_hmac_valid,
+      callback_state_matches_cookie: preValidation.callback_state_matches_cookie,
+      duplicate_state_cookie_detected:
+        preValidation.duplicate_state_cookie_detected,
+      redirect_uri_matches_expected: preValidation.redirect_uri_matches_expected,
+      configured_api_key_matches_toml_client_id:
+        preValidation.configured_api_key_matches_toml_client_id,
+    });
+
     logShopifyAuthCallbackStart(shop);
 
     const callbackResult = await listingFixShopifyApi.auth.callback({
@@ -222,7 +245,7 @@ export async function handleOAuthCallbackRoute(
     }
 
     logShopifyAuthCallbackFailure(shop, error);
-    logOAuthCallbackUnhandledFailure(shop, error, request);
+    logOAuthCallbackUnhandledFailure(shop, error, request, preValidation);
     recordAuthFlowStep(request, "oauth_callback_validation_failure", {
       shop,
       failureType: error instanceof Error ? error.name : "unknown",

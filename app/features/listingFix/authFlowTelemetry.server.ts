@@ -114,7 +114,28 @@ function inferLikelyRootCause(state: AuthFlowState): string {
   const last = events.at(-1) ?? "unknown";
 
   if (events.includes("oauth_callback_validation_failure")) {
-    return "OAuth callback validation failed — check state cookie round-trip and redirect URL config.";
+    const preValidationStep = state.steps.find(
+      (step) => step.event === "oauth_callback_pre_validation",
+    );
+    if (preValidationStep?.meta?.callback_hmac_valid === false) {
+      return "OAuth callback HMAC validation failed — SHOPIFY_API_SECRET on Railway likely does not match Shopify Dev Dashboard Client secret.";
+    }
+    if (preValidationStep?.meta?.callback_state_matches_cookie === false) {
+      return "OAuth callback state query does not match verified state cookie.";
+    }
+    if (preValidationStep?.meta?.duplicate_state_cookie_detected === true) {
+      return "Duplicate shopify_app_state cookies detected on callback.";
+    }
+    if (preValidationStep?.meta?.redirect_uri_matches_expected === false) {
+      return "Configured redirect URI does not match https://listing-fix-production.up.railway.app/auth/callback.";
+    }
+    if (
+      preValidationStep?.meta?.configured_api_key_matches_toml_client_id ===
+      false
+    ) {
+      return "SHOPIFY_API_KEY does not match shopify.app.toml client_id.";
+    }
+    return "OAuth callback validation failed — inspect oauth_callback_pre_validation logs for HMAC, state, and redirect URI.";
   }
   if (events.includes("prisma_storeSession_failure")) {
     return "Prisma session write failed after OAuth — check DATABASE_URL and Session schema.";
@@ -141,6 +162,18 @@ function inferLikelyRootCause(state: AuthFlowState): string {
 
 function inferNextAction(state: AuthFlowState): string {
   const cause = inferLikelyRootCause(state);
+  if (cause.includes("HMAC validation failed")) {
+    return "Copy Client secret from Shopify Dev Dashboard into Railway SHOPIFY_API_SECRET exactly, redeploy, then retry OAuth.";
+  }
+  if (cause.includes("Duplicate shopify_app_state")) {
+    return "Clear cookies for listing-fix-production.up.railway.app and retry OAuth once.";
+  }
+  if (cause.includes("redirect URI")) {
+    return "Set SHOPIFY_APP_URL=https://listing-fix-production.up.railway.app and confirm Partner redirect URLs.";
+  }
+  if (cause.includes("SHOPIFY_API_KEY")) {
+    return "Set Railway SHOPIFY_API_KEY to shopify.app.toml client_id and redeploy.";
+  }
   if (cause.includes("cookie")) {
     return "Run npm run auth:e2e and confirm /auth?embedded=0 returns Set-Cookie before callback.";
   }

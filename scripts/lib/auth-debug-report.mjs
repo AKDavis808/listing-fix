@@ -43,8 +43,9 @@ export function parseShopifyAppToml(rootDir = process.cwd()) {
 
   const scopesMatch = content.match(/^scopes\s*=\s*"([^"]+)"/m);
   const scopes = scopesMatch?.[1]?.split(",").map((s) => s.trim()) ?? [];
+  const clientId = content.match(/^client_id\s*=\s*"([^"]+)"/m)?.[1] ?? null;
 
-  return { applicationUrl, redirectUrls, webhookUris, scopes, tomlPath };
+  return { applicationUrl, redirectUrls, webhookUris, scopes, clientId, tomlPath };
 }
 
 export function writeAuthDebugReport(report, rootDir = process.cwd()) {
