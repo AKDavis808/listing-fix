@@ -1,9 +1,6 @@
 import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
-  shopifyApi,
-} from "@shopify/shopify-api";
-import {
   AppDistribution,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
@@ -19,8 +16,6 @@ import {
   logSessionPersistenceEvent,
   verifyPrismaSessionPersisted,
 } from "./features/listingFix/sessionPersistence.server";
-import { bootstrapOfflineSessionIfNeeded } from "./features/listingFix/tokenExchangeBootstrap.server";
-import { logListingFixEvent } from "./features/listingFix/telemetry";
 
 const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
 const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
@@ -30,25 +25,6 @@ const useOnlineTokens = false;
 const expiringOfflineAccessTokens = true;
 const distribution = AppDistribution.AppStore;
 
-function createListingFixShopifyApi() {
-  if (!appUrl) {
-    throw new Error("SHOPIFY_APP_URL is required.");
-  }
-
-  const url = new URL(appUrl);
-  return shopifyApi({
-    apiKey,
-    apiSecretKey,
-    apiVersion: ApiVersion.October25,
-    scopes,
-    hostName: url.host,
-    hostScheme: url.protocol.replace(":", "") as "http" | "https",
-    isEmbeddedApp: true,
-    isCustomStoreApp: false,
-  });
-}
-
-const listingFixApi = createListingFixShopifyApi();
 const sessionStorage = new InstrumentedPrismaSessionStorage(prisma);
 
 logAuthDiagnosticOnce("shopify_auth_config", () => {
@@ -101,50 +77,14 @@ export const apiVersion = ApiVersion.October25;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 export const authenticate = {
   ...shopify.authenticate,
-  admin: async (request: Request) => {
-    const bootstrapResult = await bootstrapOfflineSessionIfNeeded(
-      request,
-      listingFixApi,
-      sessionStorage,
-    );
-
-    logAuthDiagnosticOnce(
-      `bootstrap_complete:${bootstrapResult.offlineSessionId ?? "unknown"}:${bootstrapResult.status}`,
-      () => {
-        logListingFixEvent({
-          action:
-            bootstrapResult.status === "success"
-              ? "session_restored"
-              : "oauth_start",
-          shop: new URL(request.url).searchParams.get("shop"),
-          meta: {
-            event: "bootstrap_complete_before_authenticate_admin",
-            bootstrap_status: bootstrapResult.status,
-            bootstrap_decision: bootstrapResult.decision,
-            bootstrap_verify_session_saved: bootstrapResult.sessionVerified,
-            token_exchange_token_source: bootstrapResult.tokenSource,
-            offlineSessionId: bootstrapResult.offlineSessionId,
-          },
-        });
-      },
-    );
-
-    return authenticateEmbeddedAdmin(
+  admin: (request: Request) =>
+    authenticateEmbeddedAdmin(
       request,
       shopify.authenticate.admin.bind(shopify.authenticate),
-    );
-  },
+    ),
 };
 export const unauthenticated = shopify.unauthenticated;
-export const login = (request: Request) => {
-  const shop = new URL(request.url).searchParams.get("shop");
-  logAuthDiagnosticOnce(`oauth_begin:${shop ?? "unknown"}`, () => {
-    logSessionPersistenceEvent("oauth_begin", shop, {
-      route: "auth.login",
-      method: request.method,
-    });
-  });
-  return loginWithEmbeddedContext(request, shopify.login.bind(shopify));
-};
+export const login = (request: Request) =>
+  loginWithEmbeddedContext(request, shopify.login.bind(shopify));
 export const registerWebhooks = shopify.registerWebhooks;
 export { sessionStorage };

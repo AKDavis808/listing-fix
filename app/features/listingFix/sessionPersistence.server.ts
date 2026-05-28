@@ -8,9 +8,6 @@ export type SessionPersistenceEvent =
   | "oauth_begin"
   | "oauth_callback_entered"
   | "oauth_callback_completed"
-  | "token_exchange_start"
-  | "token_exchange_success"
-  | "token_exchange_failure"
   | "prisma_session_saved"
   | "prisma_session_lookup"
   | "prisma_session_lookup_failed"
@@ -29,25 +26,20 @@ export function getOfflineSessionId(shop: string): string {
   return `offline_${normalizeShopDomain(shop)}`;
 }
 
-export function getOnlineSessionId(shop: string, userId: string): string {
-  return `${normalizeShopDomain(shop)}_${userId}`;
-}
-
 export function logSessionPersistenceEvent(
   event: SessionPersistenceEvent,
   shop?: string | null,
   meta?: Record<string, string | number | boolean | null | undefined>,
 ): void {
   const action =
-    event === "oauth_callback_completed" ||
-    event === "token_exchange_success" ||
-    event === "token_exchange_failure"
+    event === "oauth_callback_completed"
       ? "oauth_complete"
-      : event.startsWith("oauth_") || event === "token_exchange_start"
+      : event.startsWith("oauth_")
         ? "oauth_start"
         : event === "prisma_session_saved" ||
             event === "offline_session_id" ||
-            event === "online_session_id"
+            event === "online_session_id" ||
+            (event === "prisma_session_lookup" && meta?.found === true)
           ? "session_restored"
           : "session_missing";
 
