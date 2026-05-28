@@ -700,10 +700,24 @@ export function renderSessionTokenBouncePage(request: Request): never {
           console.log("session_token_requested", { retryCount: retryCount });
           var token;
           try {
-            token = await window.shopify.idToken();
-            console.log("session_token_received", { retryCount: retryCount });
+            token = String(await window.shopify.idToken() || "").trim();
+            console.log("session_token_received", {
+              retryCount: retryCount,
+              dotCount: token ? token.split(".").length - 1 : 0,
+              length: token.length,
+            });
           } catch (error) {
             logError(String(error));
+            return;
+          }
+
+          if (!token || token.split(".").length !== 3) {
+            logError("invalid_session_token_shape");
+            var invalidShop = pageParams.get("shop");
+            var invalidOauthUrl = buildOAuthInstallUrl(invalidShop);
+            if (invalidOauthUrl) {
+              showReconnectPrompt(invalidOauthUrl, "invalid_session_token_shape");
+            }
             return;
           }
 
@@ -763,16 +777,6 @@ export function renderSessionTokenBouncePage(request: Request): never {
             navigationTarget &&
             navigationTarget.reason === "unauthorized_without_reauth_url"
           ) {
-            if (retryCount < MAX_BOUNCE_RETRIES) {
-              console.log("session_token_auth_retry", {
-                retryCount: retryCount + 1,
-              });
-              await new Promise(function (resolve) {
-                setTimeout(resolve, 500);
-              });
-              return performBounceReload(retryCount + 1);
-            }
-
             var shop = pageParams.get("shop");
             var oauthUrl = buildOAuthInstallUrl(shop);
             if (oauthUrl) {

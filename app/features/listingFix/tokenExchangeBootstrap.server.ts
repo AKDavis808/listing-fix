@@ -7,14 +7,17 @@ import {
   getOfflineSessionId,
   logSessionPersistenceEvent,
 } from "./sessionPersistence.server";
-import { sanitizeErrorMessage } from "./telemetry";
+import {
+  isSessionTokenBounceRequest,
+  resolveSessionTokenForExchange,
+  type SessionTokenSource,
+} from "./sessionTokenInput.server";
+import { sanitizeErrorMessage, logListingFixEvent } from "./telemetry";
 
 const OFFLINE_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const bootstrapInFlight = new Set<string>();
-
-function hasAuthorizationHeader(request: Request): boolean {
-  return Boolean(request.headers.get("authorization")?.match(/^Bearer /i));
-}
+const rejectedTokenFingerprints = new Map<string, number>();
+const REJECTED_TOKEN_TTL_MS = 60_000;
 
 function isOfflineRowUsable(
   row: {
@@ -27,12 +30,60 @@ function isOfflineRowUsable(
   return row.expires.getTime() > Date.now() + OFFLINE_EXPIRY_BUFFER_MS;
 }
 
+function tokenFingerprint(token: string): string {
+  return `${token.length}:${token.split(".").length}:${token.slice(0, 12)}:${token.slice(-12)}`;
+}
+
+function shouldSkipRejectedToken(shop: string, token: string): boolean {
+  const key = `${shop}:${tokenFingerprint(token)}`;
+  const rejectedAt = rejectedTokenFingerprints.get(key);
+  if (!rejectedAt) return false;
+
+  if (Date.now() - rejectedAt > REJECTED_TOKEN_TTL_MS) {
+    rejectedTokenFingerprints.delete(key);
+    return false;
+  }
+
+  return true;
+}
+
+function rememberRejectedToken(shop: string, token: string): void {
+  rejectedTokenFingerprints.set(
+    `${shop}:${tokenFingerprint(token)}`,
+    Date.now(),
+  );
+}
+
+function logTokenExchangeDiagnostics(
+  shop: string,
+  source: SessionTokenSource,
+  shape: ReturnType<typeof resolveSessionTokenForExchange>["shape"],
+  extra?: Record<string, string | number | boolean | null | undefined>,
+): void {
+  logAuthDiagnosticOnce(`token_exchange_diag:${shop}:${source}`, () => {
+    logListingFixEvent({
+      action: "oauth_start",
+      shop,
+      meta: {
+        event: "token_exchange_token_diagnostics",
+        token_exchange_token_source: source,
+        token_exchange_token_shape_dotCount: shape.dotCount,
+        token_exchange_token_shape_length: shape.length,
+        token_exchange_token_shape_startsWithBearer: shape.startsWithBearer,
+        ...extra,
+      },
+    });
+  });
+}
+
 export async function bootstrapOfflineSessionIfNeeded(
   request: Request,
   api: Shopify,
   sessionStorage: SessionStorage,
 ): Promise<void> {
-  if (!hasAuthorizationHeader(request)) return;
+  if (!isSessionTokenBounceRequest(request)) {
+    return;
+  }
 
   const shop = new URL(request.url).searchParams.get("shop");
   if (!shop) return;
@@ -46,23 +97,46 @@ export async function bootstrapOfflineSessionIfNeeded(
     return;
   }
 
+  const { token, source, shape } = resolveSessionTokenForExchange(request);
+
+  if (!token || source !== "authorization_header") {
+    logTokenExchangeDiagnostics(shop, source, shape, {
+      offlineSessionId,
+      skipped: true,
+      reason:
+        source === "url_id_token"
+          ? "url_id_token_not_used_for_bootstrap"
+          : source === "authorization_header"
+            ? "authorization_header_invalid_shape"
+            : "missing_session_token",
+    });
+    return;
+  }
+
+  if (shouldSkipRejectedToken(shop, token)) {
+    return;
+  }
+
   if (bootstrapInFlight.has(shop)) {
     return;
   }
 
   bootstrapInFlight.add(shop);
 
-  const sessionToken = request.headers.get("authorization")!.replace(/^Bearer /i, "");
+  logTokenExchangeDiagnostics(shop, "authorization_header", shape, {
+    offlineSessionId,
+  });
 
   logAuthDiagnosticOnce(`token_exchange_start:${shop}`, () => {
     logSessionPersistenceEvent("token_exchange_start", shop, {
       offlineSessionId,
+      token_exchange_token_source: "authorization_header",
     });
   });
 
   try {
     const { session } = await api.auth.tokenExchange({
-      sessionToken,
+      sessionToken: token,
       shop,
       requestedTokenType: RequestedTokenType.OfflineAccessToken,
       expiring: true,
@@ -73,11 +147,20 @@ export async function bootstrapOfflineSessionIfNeeded(
     logSessionPersistenceEvent("token_exchange_success", shop, {
       sessionId: session.id,
       stored,
+      token_exchange_token_source: "authorization_header",
     });
   } catch (error) {
-    logSessionPersistenceEvent("token_exchange_failure", shop, {
-      offlineSessionId,
-      message: sanitizeErrorMessage(error),
+    rememberRejectedToken(shop, token);
+
+    logAuthDiagnosticOnce(`token_exchange_failure:${shop}`, () => {
+      logSessionPersistenceEvent("token_exchange_failure", shop, {
+        offlineSessionId,
+        token_exchange_token_source: "authorization_header",
+        token_exchange_token_shape_dotCount: shape.dotCount,
+        token_exchange_token_shape_length: shape.length,
+        token_exchange_token_shape_startsWithBearer: shape.startsWithBearer,
+        message: sanitizeErrorMessage(error),
+      });
     });
   } finally {
     bootstrapInFlight.delete(shop);
