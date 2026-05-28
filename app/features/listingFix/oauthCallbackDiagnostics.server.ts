@@ -7,6 +7,7 @@ import {
 
 import {
   applyEmbeddedOAuthCookiePolicy,
+  EMBEDDED_OAUTH_COOKIE_PATH,
   logCallbackCookiePresence,
   STATE_COOKIE_NAME,
 } from "./oauthCookiePolicy.server";
@@ -99,8 +100,10 @@ export function logOAuthCallbackQuery(request: Request): void {
       cookieHeaderPresent: Boolean(cookieHeader),
       stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
       callback_cookie_present: cookieNames.includes(STATE_COOKIE_NAME),
+      callback_cookie_names: cookieNames.join(","),
       oauth_cookie_samesite: "none",
       oauth_cookie_secure: true,
+      oauth_cookie_path: EMBEDDED_OAUTH_COOKIE_PATH,
       cookieNames: cookieNames.join(","),
       referer: request.headers.get("referer") ?? null,
       userAgentPresent: Boolean(request.headers.get("user-agent")),
@@ -131,7 +134,16 @@ export function logOAuthBeginResponse(
   callbackPath: string,
 ): void {
   const url = new URL(request.url);
-  const setCookie = response.headers.get("set-cookie");
+  const setCookies =
+    typeof response.headers.getSetCookie === "function"
+      ? response.headers.getSetCookie()
+      : (() => {
+          const combined = response.headers.get("set-cookie");
+          return combined ? [combined] : [];
+        })();
+  const stateSetCookie = setCookies.find((cookie) =>
+    cookie.startsWith(`${STATE_COOKIE_NAME}=`),
+  );
   const location = response.headers.get("location");
 
   logListingFixEvent({
@@ -146,13 +158,14 @@ export function logOAuthBeginResponse(
       oauth_redirect_location: location,
       locationPresent: Boolean(location),
       locationHost: location ? safeUrlHost(location) : null,
-      setCookiePresent: Boolean(setCookie),
-      setCookieHasStateCookie: setCookie?.includes(STATE_COOKIE_NAME) ?? false,
-      setCookieSameSite: extractCookieAttribute(setCookie, "SameSite"),
-      setCookieSecure: extractCookieAttribute(setCookie, "Secure"),
-      oauth_cookie_samesite: extractCookieAttribute(setCookie, "SameSite"),
-      oauth_cookie_secure: extractCookieAttribute(setCookie, "Secure"),
-      setCookiePath: extractCookieAttribute(setCookie, "Path"),
+      setCookiePresent: setCookies.length > 0,
+      setCookieHasStateCookie: Boolean(stateSetCookie),
+      setCookieSameSite: extractCookieAttribute(stateSetCookie ?? null, "SameSite"),
+      setCookieSecure: extractCookieAttribute(stateSetCookie ?? null, "Secure"),
+      oauth_cookie_samesite: extractCookieAttribute(stateSetCookie ?? null, "SameSite"),
+      oauth_cookie_secure: extractCookieAttribute(stateSetCookie ?? null, "Secure"),
+      setCookiePath: extractCookieAttribute(stateSetCookie ?? null, "Path"),
+      oauth_cookie_path: extractCookieAttribute(stateSetCookie ?? null, "Path"),
       embedded: url.searchParams.get("embedded") === "1",
       hasHost: Boolean(url.searchParams.get("host")),
     },
