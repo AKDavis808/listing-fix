@@ -9,16 +9,19 @@ export type SessionTokenShape = {
   dotCount: number;
   length: number;
   startsWithBearer: boolean;
+  hasThreeJwtSections: boolean;
 };
 
 export function describeSessionTokenShape(
   token: string | null | undefined,
 ): SessionTokenShape {
   const value = token?.trim() ?? "";
+  const dotCount = value ? value.split(".").length - 1 : 0;
   return {
-    dotCount: value ? value.split(".").length - 1 : 0,
+    dotCount,
     length: value.length,
     startsWithBearer: /^Bearer\s+/i.test(value),
+    hasThreeJwtSections: dotCount === 3,
   };
 }
 
@@ -53,11 +56,37 @@ export function isSessionTokenBounceRequest(request: Request): boolean {
   return request.headers.has(BOUNCE_REQUEST_HEADER);
 }
 
+export function isEmbeddedIframeLoadRequest(request: Request): boolean {
+  const url = new URL(request.url);
+  return (
+    url.searchParams.get("embedded") === "1" &&
+    Boolean(url.searchParams.get("shop")) &&
+    Boolean(url.searchParams.get("host"))
+  );
+}
+
+export function shouldAttemptTokenExchangeBootstrap(request: Request): boolean {
+  if (!isEmbeddedIframeLoadRequest(request) && !isSessionTokenBounceRequest(request)) {
+    return false;
+  }
+
+  return Boolean(extractUrlIdToken(request) || extractBearerSessionToken(request));
+}
+
 export function resolveSessionTokenForExchange(request: Request): {
   token: string | null;
   source: SessionTokenSource;
   shape: SessionTokenShape;
 } {
+  const urlToken = extractUrlIdToken(request);
+  if (urlToken) {
+    const shape = describeSessionTokenShape(urlToken);
+    if (isValidSessionTokenShape(urlToken)) {
+      return { token: urlToken, source: "url_id_token", shape };
+    }
+    return { token: null, source: "url_id_token", shape };
+  }
+
   const bearer = extractBearerSessionToken(request);
   if (bearer) {
     const shape = describeSessionTokenShape(bearer);
@@ -65,15 +94,6 @@ export function resolveSessionTokenForExchange(request: Request): {
       return { token: bearer, source: "authorization_header", shape };
     }
     return { token: null, source: "authorization_header", shape };
-  }
-
-  const urlToken = extractUrlIdToken(request);
-  if (urlToken) {
-    return {
-      token: null,
-      source: "url_id_token",
-      shape: describeSessionTokenShape(urlToken),
-    };
   }
 
   return {

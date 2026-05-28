@@ -8,11 +8,11 @@ import {
   logSessionPersistenceEvent,
 } from "./sessionPersistence.server";
 import {
-  isSessionTokenBounceRequest,
   resolveSessionTokenForExchange,
+  shouldAttemptTokenExchangeBootstrap,
   type SessionTokenSource,
 } from "./sessionTokenInput.server";
-import { sanitizeErrorMessage, logListingFixEvent } from "./telemetry";
+import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
 const OFFLINE_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const bootstrapInFlight = new Set<string>();
@@ -69,6 +69,7 @@ function logTokenExchangeDiagnostics(
         token_exchange_token_source: source,
         token_exchange_token_shape_dotCount: shape.dotCount,
         token_exchange_token_shape_length: shape.length,
+        token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
         token_exchange_token_shape_startsWithBearer: shape.startsWithBearer,
         ...extra,
       },
@@ -81,7 +82,7 @@ export async function bootstrapOfflineSessionIfNeeded(
   api: Shopify,
   sessionStorage: SessionStorage,
 ): Promise<void> {
-  if (!isSessionTokenBounceRequest(request)) {
+  if (!shouldAttemptTokenExchangeBootstrap(request)) {
     return;
   }
 
@@ -99,13 +100,13 @@ export async function bootstrapOfflineSessionIfNeeded(
 
   const { token, source, shape } = resolveSessionTokenForExchange(request);
 
-  if (!token || source !== "authorization_header") {
+  if (!token) {
     logTokenExchangeDiagnostics(shop, source, shape, {
       offlineSessionId,
       skipped: true,
       reason:
         source === "url_id_token"
-          ? "url_id_token_not_used_for_bootstrap"
+          ? "url_id_token_invalid_shape"
           : source === "authorization_header"
             ? "authorization_header_invalid_shape"
             : "missing_session_token",
@@ -117,20 +118,23 @@ export async function bootstrapOfflineSessionIfNeeded(
     return;
   }
 
-  if (bootstrapInFlight.has(shop)) {
+  const inFlightKey = `${shop}:${tokenFingerprint(token)}`;
+  if (bootstrapInFlight.has(inFlightKey)) {
     return;
   }
 
-  bootstrapInFlight.add(shop);
+  bootstrapInFlight.add(inFlightKey);
 
-  logTokenExchangeDiagnostics(shop, "authorization_header", shape, {
+  logTokenExchangeDiagnostics(shop, source, shape, {
     offlineSessionId,
   });
 
-  logAuthDiagnosticOnce(`token_exchange_start:${shop}`, () => {
+  logAuthDiagnosticOnce(`token_exchange_start:${shop}:${source}`, () => {
     logSessionPersistenceEvent("token_exchange_start", shop, {
       offlineSessionId,
-      token_exchange_token_source: "authorization_header",
+      token_exchange_token_source: source,
+      token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
+      token_exchange_token_shape_length: shape.length,
     });
   });
 
@@ -147,22 +151,23 @@ export async function bootstrapOfflineSessionIfNeeded(
     logSessionPersistenceEvent("token_exchange_success", shop, {
       sessionId: session.id,
       stored,
-      token_exchange_token_source: "authorization_header",
+      token_exchange_token_source: source,
+      token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
+      token_exchange_token_shape_length: shape.length,
     });
   } catch (error) {
     rememberRejectedToken(shop, token);
 
-    logAuthDiagnosticOnce(`token_exchange_failure:${shop}`, () => {
+    logAuthDiagnosticOnce(`token_exchange_failure:${shop}:${source}`, () => {
       logSessionPersistenceEvent("token_exchange_failure", shop, {
         offlineSessionId,
-        token_exchange_token_source: "authorization_header",
-        token_exchange_token_shape_dotCount: shape.dotCount,
+        token_exchange_token_source: source,
+        token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
         token_exchange_token_shape_length: shape.length,
-        token_exchange_token_shape_startsWithBearer: shape.startsWithBearer,
         message: sanitizeErrorMessage(error),
       });
     });
   } finally {
-    bootstrapInFlight.delete(shop);
+    bootstrapInFlight.delete(inFlightKey);
   }
 }
