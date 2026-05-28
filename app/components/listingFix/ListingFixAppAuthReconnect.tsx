@@ -1,4 +1,4 @@
-import { Page } from "@shopify/polaris";
+import { Page, Text } from "@shopify/polaris";
 import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
 import { isRouteErrorResponse, useLocation, useRouteError } from "react-router";
 import { useEffect } from "react";
@@ -30,6 +30,12 @@ export function ListingFixAppAuthReconnect() {
 
   useEffect(() => {
     if (!isUnauthorizedRouteError(error)) return;
+    if (typeof window !== "undefined") {
+      if (window.sessionStorage.getItem("listingfix_reconnect_shown") === "1") {
+        return;
+      }
+      window.sessionStorage.setItem("listingfix_reconnect_shown", "1");
+    }
 
     logListingFixEvent({
       action: "auth_401_caught",
@@ -48,12 +54,29 @@ export function ListingFixAppAuthReconnect() {
         embedded: isEmbedded,
         hasShop,
         event: "embedded_session_missing_offline_session",
+        reconnectShownOnce: true,
       },
     });
   }, [error, hasShop, isEmbedded, location.pathname, shop]);
 
   if (!isUnauthorizedRouteError(error)) {
     return null;
+  }
+
+  if (
+    typeof window !== "undefined" &&
+    window.sessionStorage.getItem("listingfix_reconnect_shown") === "1"
+  ) {
+    return (
+      <PolarisAppProvider i18n={translations}>
+        <Page title="Reconnect ListingFix">
+          <Text as="p" variant="bodyMd" tone="subdued">
+            Reconnect was already shown for this browser session. Check Railway
+            logs for OAuth session diagnostics.
+          </Text>
+        </Page>
+      </PolarisAppProvider>
+    );
   }
 
   const recoveryLoginUrl = `/auth/login${location.search}`;

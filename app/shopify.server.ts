@@ -11,11 +11,13 @@ import {
   loginWithEmbeddedContext,
   normalizeShopifyAppUrl,
 } from "./features/listingFix/embeddedAuth.server";
-import { InstrumentedPrismaSessionStorage } from "./features/listingFix/prismaSessionStorage.server";
 import {
-  logSessionPersistenceEvent,
-  verifyPrismaSessionPersisted,
-} from "./features/listingFix/sessionPersistence.server";
+  logAfterAuthFinished,
+  logAfterAuthStart,
+  logStartupSessionDiagnostics,
+} from "./features/listingFix/oauthSessionDiagnostics.server";
+import { InstrumentedPrismaSessionStorage } from "./features/listingFix/prismaSessionStorage.server";
+import { verifyPrismaSessionPersisted } from "./features/listingFix/sessionPersistence.server";
 
 const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
 const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
@@ -41,6 +43,8 @@ logAuthDiagnosticOnce("shopify_auth_config", () => {
   });
 });
 
+void logStartupSessionDiagnostics();
+
 const shopify = shopifyApp({
   apiKey,
   apiSecretKey,
@@ -56,15 +60,11 @@ const shopify = shopifyApp({
   },
   hooks: {
     afterAuth: async ({ session }) => {
-      const verified = await verifyPrismaSessionPersisted(session);
+      logAfterAuthStart(session);
 
-      logAuthDiagnosticOnce(`after_auth:${session.shop}`, () => {
-        logSessionPersistenceEvent("oauth_callback_completed", session.shop, {
-          sessionId: session.id,
-          isOnline: session.isOnline,
-          prismaVerified: verified,
-        });
-      });
+      const prismaVerified = await verifyPrismaSessionPersisted(session);
+
+      logAfterAuthFinished(session, prismaVerified);
     },
   },
   ...(process.env.SHOP_CUSTOM_DOMAIN

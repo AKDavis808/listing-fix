@@ -13,11 +13,17 @@ import {
   isEmbeddedLoginRequest,
   logEmbeddedAuthEvent,
 } from "../../features/listingFix/embeddedAuth.server";
+import { logAuthDiagnosticOnce } from "../../features/listingFix/authDiagnostics.server";
+import { logAuthRouteEntered } from "../../features/listingFix/oauthSessionDiagnostics.server";
 import { logListingFixEvent } from "../../features/listingFix/telemetry";
 import { login } from "../../shopify.server";
 import { loginErrorMessage } from "./error.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const url = new URL(request.url);
+  const shop = url.searchParams.get("shop");
+
+  logAuthRouteEntered(url.pathname, shop, { route: "auth.login" });
   logEmbeddedAuthEvent("iframe_request", request, { route: "auth.login" });
 
   const isEmbedded = isEmbeddedLoginRequest(request);
@@ -35,8 +41,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       reason: "embedded_without_shop",
     });
   }
-
-  const shop = new URL(request.url).searchParams.get("shop");
 
   if (isEmbedded && hasShop && shop) {
     logEmbeddedAuthEvent("session_missing", request, {

@@ -18,6 +18,7 @@ type AuthLogMeta = Record<string, string | number | boolean | null | undefined>;
 const LOGIN_PATH = "/auth/login";
 const REAUTH_URL_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
 const BOUNCE_REQUEST_HEADER = "X-Shopify-Bounce";
+const REDIRECT_ONCE_PREFIX = "auth_redirect_once:";
 
 function extractRequestContext(request: Request) {
   const url = new URL(request.url);
@@ -214,36 +215,44 @@ export function redirectToLoginWithEmbeddedContext(
   request: Request,
 ): never {
   const url = new URL(request.url);
-  const params = new URLSearchParams();
-
   const shop = url.searchParams.get("shop");
-  const host = url.searchParams.get("host");
-  const embedded = url.searchParams.get("embedded");
+  const redirectKey = `${REDIRECT_ONCE_PREFIX}${shop ?? url.pathname}`;
 
-  if (shop) params.set("shop", shop);
-  if (host) params.set("host", host);
-  if (embedded) params.set("embedded", embedded);
+  logAuthDiagnosticOnce(redirectKey, () => {
+    const params = new URLSearchParams();
 
-  logEmbeddedAuthEvent("auth_redirect", request, {
-    target: LOGIN_PATH,
-    preservedShop: Boolean(shop),
-    preservedHost: Boolean(host),
-    authRedirectReason: "embedded_login_recovery",
-  });
+    const host = url.searchParams.get("host");
+    const embedded = url.searchParams.get("embedded");
 
-  logListingFixEvent({
-    action: "auth_redirect_preserved",
-    shop,
-    meta: {
+    if (shop) params.set("shop", shop);
+    if (host) params.set("host", host);
+    if (embedded) params.set("embedded", embedded);
+
+    logEmbeddedAuthEvent("auth_redirect", request, {
       target: LOGIN_PATH,
       preservedShop: Boolean(shop),
       preservedHost: Boolean(host),
       authRedirectReason: "embedded_login_recovery",
-    },
+      redirectOnce: true,
+    });
+
+    logListingFixEvent({
+      action: "auth_redirect_preserved",
+      shop,
+      meta: {
+        target: LOGIN_PATH,
+        preservedShop: Boolean(shop),
+        preservedHost: Boolean(host),
+        authRedirectReason: "embedded_login_recovery",
+        redirectOnce: true,
+      },
+    });
+
+    const query = params.toString();
+    throw redirect(`${LOGIN_PATH}${query ? `?${query}` : ""}`);
   });
 
-  const query = params.toString();
-  throw redirect(`${LOGIN_PATH}${query ? `?${query}` : ""}`);
+  throw new Response("Unauthorized", { status: 401 });
 }
 
 type AdminAuthResult = {
