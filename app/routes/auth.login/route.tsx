@@ -13,6 +13,7 @@ import {
   isEmbeddedLoginRequest,
   logEmbeddedAuthEvent,
 } from "../../features/listingFix/embeddedAuth.server";
+import { logListingFixEvent } from "../../features/listingFix/telemetry";
 import { login } from "../../shopify.server";
 import { loginErrorMessage } from "./error.server";
 

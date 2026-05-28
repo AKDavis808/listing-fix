@@ -13,7 +13,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     logListingFixEvent({
       action: "oauth_start",
       shop: url.searchParams.get("shop"),
-      meta: { route: "auth.$", event: "oauth_callback_start" },
+      meta: { route: "auth.$", event: "oauth_callback_entered" },
     });
   }
 
@@ -23,7 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     logListingFixEvent({
       action: "oauth_complete",
       shop: url.searchParams.get("shop"),
-      meta: { route: "auth.$", event: "oauth_callback_session_stored" },
+      meta: { route: "auth.$", event: "oauth_callback_completed" },
     });
   }
 

@@ -1,5 +1,11 @@
 import { redirect } from "react-router";
 
+import { deleteShopSessions } from "./shopSessions.server";
+import {
+  getOfflineSessionId,
+  logSessionPersistenceEvent,
+  logShopSessionSnapshot,
+} from "./sessionPersistence.server";
 import { logListingFixEvent } from "./telemetry";
 
 export type EmbeddedAuthEvent =
@@ -119,17 +125,19 @@ function escapeHtmlAttribute(value: string): string {
 
 export function buildEmbeddedOAuthInstallUrl(shop: string): string {
   const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
-  const scopes = process.env.SCOPES?.trim() ?? "";
   const shopWithoutProtocol = shop.replace(/^https?:\/\//, "").replace(/\/$/, "");
   const shopWithDomain =
     shopWithoutProtocol.indexOf(".") === -1
       ? `${shopWithoutProtocol}.myshopify.com`
       : shopWithoutProtocol;
-  const params = new URLSearchParams({
-    client_id: apiKey,
-    scope: scopes,
-  });
 
+  const shopNameMatch = shopWithDomain.match(/^(.+)\.myshopify\.com$/);
+  if (shopNameMatch) {
+    const params = new URLSearchParams({ client_id: apiKey });
+    return `https://admin.shopify.com/store/${shopNameMatch[1]}/oauth/install?${params.toString()}`;
+  }
+
+  const params = new URLSearchParams({ client_id: apiKey });
   return `https://${shopWithDomain}/admin/oauth/install?${params.toString()}`;
 }
 
@@ -255,6 +263,7 @@ export function renderSessionTokenBouncePage(request: Request): never {
   const shop = url.searchParams.get("shop");
   const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
   const oauthScopes = process.env.SCOPES?.trim() ?? "";
+  const oauthInstallUrl = shop ? buildEmbeddedOAuthInstallUrl(shop) : "";
   const reloadResolution = resolveSessionTokenReloadTarget(request);
   const { reloadUrl, defaulted, preventedSelfReload } = reloadResolution;
 
@@ -394,6 +403,8 @@ export function renderSessionTokenBouncePage(request: Request): never {
     <script>
       (function () {
         var REAUTH_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
+        var RETRY_SESSION_HEADER = "X-Shopify-Retry-Invalid-Session-Request";
+        var MAX_BOUNCE_RETRIES = 3;
         var pageParams = new URLSearchParams(location.search);
         var appOrigin = location.origin;
         var pendingReconnectUrl = null;
@@ -402,8 +413,10 @@ export function renderSessionTokenBouncePage(request: Request): never {
         var shopifyReload = ${JSON.stringify(reloadUrl ?? "")};
         var oauthScopes = ${JSON.stringify(oauthScopes)};
         var oauthApiKey = ${JSON.stringify(apiKey)};
+        var serverOAuthInstallUrl = ${JSON.stringify(oauthInstallUrl)};
 
         function buildOAuthInstallUrl(shop) {
+          if (serverOAuthInstallUrl) return serverOAuthInstallUrl;
           if (!shop || !oauthApiKey) return "";
           var shopWithoutProtocol = String(shop)
             .replace(/^https?:\\/\\//, "")
@@ -412,10 +425,18 @@ export function renderSessionTokenBouncePage(request: Request): never {
             shopWithoutProtocol.indexOf(".") === -1
               ? shopWithoutProtocol + ".myshopify.com"
               : shopWithoutProtocol;
+          var shopNameMatch = shopWithDomain.match(/^(.+)\\.myshopify\\.com$/);
           var params = new URLSearchParams({
             client_id: oauthApiKey,
-            scope: oauthScopes,
           });
+          if (shopNameMatch) {
+            return (
+              "https://admin.shopify.com/store/" +
+              shopNameMatch[1] +
+              "/oauth/install?" +
+              params.toString()
+            );
+          }
           return (
             "https://" + shopWithDomain + "/admin/oauth/install?" + params.toString()
           );
@@ -638,6 +659,9 @@ export function renderSessionTokenBouncePage(request: Request): never {
           }
 
           if (response.status === 401) {
+            if (response.headers.get(RETRY_SESSION_HEADER)) {
+              return { url: null, reason: "retry_invalid_session" };
+            }
             return { url: null, reason: "unauthorized_without_reauth_url" };
           }
 
@@ -685,7 +709,8 @@ export function renderSessionTokenBouncePage(request: Request): never {
           document.close();
         }
 
-        async function performBounceReload() {
+        async function performBounceReload(retryCount) {
+          if (typeof retryCount !== "number") retryCount = 0;
           if (!shopifyReload) {
             logError("missing_shopify_reload");
             return;
@@ -709,11 +734,11 @@ export function renderSessionTokenBouncePage(request: Request): never {
             return;
           }
 
-          console.log("session_token_requested");
+          console.log("session_token_requested", { retryCount: retryCount });
           var token;
           try {
             token = await window.shopify.idToken();
-            console.log("session_token_received");
+            console.log("session_token_received", { retryCount: retryCount });
           } catch (error) {
             logError(String(error));
             return;
@@ -739,14 +764,30 @@ export function renderSessionTokenBouncePage(request: Request): never {
             return;
           }
 
-          console.log("session_token_received", {
+          console.log("session_token_bounce_response", {
             status: response.status,
             ok: response.ok,
             type: response.type,
             url: response.url,
+            retryCount: retryCount,
+            retryHeader: response.headers.get(RETRY_SESSION_HEADER),
           });
 
           var navigationTarget = resolveNavigationTarget(response, reloadUrl);
+          if (
+            navigationTarget &&
+            navigationTarget.reason === "retry_invalid_session" &&
+            retryCount < MAX_BOUNCE_RETRIES
+          ) {
+            console.log("session_token_retry_invalid_session", {
+              retryCount: retryCount + 1,
+            });
+            await new Promise(function (resolve) {
+              setTimeout(resolve, 300);
+            });
+            return performBounceReload(retryCount + 1);
+          }
+
           if (navigationTarget && navigationTarget.url) {
             handleNavigationTarget(
               navigationTarget.url,
@@ -759,12 +800,23 @@ export function renderSessionTokenBouncePage(request: Request): never {
             navigationTarget &&
             navigationTarget.reason === "unauthorized_without_reauth_url"
           ) {
+            if (retryCount < MAX_BOUNCE_RETRIES) {
+              console.log("session_token_auth_retry", {
+                retryCount: retryCount + 1,
+              });
+              await new Promise(function (resolve) {
+                setTimeout(resolve, 500);
+              });
+              return performBounceReload(retryCount + 1);
+            }
+
             var shop = pageParams.get("shop");
             var oauthUrl = buildOAuthInstallUrl(shop);
             if (oauthUrl) {
               console.log("session_token_user_action_required", {
                 url: oauthUrl,
                 reason: "missing_offline_session",
+                retryCount: retryCount,
               });
               showReconnectPrompt(oauthUrl, "missing_offline_session");
             } else {
@@ -880,10 +932,10 @@ export function redirectToSessionTokenBounce(request: Request): never {
   throw redirect(`${SESSION_TOKEN_PATH}?${params.toString()}`);
 }
 
-export function handleEmbeddedUnauthorized(
+export async function handleEmbeddedUnauthorized(
   request: Request,
   response: Response,
-): never {
+): Promise<never> {
   const ctx = extractRequestContext(request);
 
   logListingFixEvent({
@@ -899,6 +951,17 @@ export function handleEmbeddedUnauthorized(
   });
 
   if (isEmbeddedSessionTokenFetch(request)) {
+    if (ctx.shop) {
+      const deletedCount = await deleteShopSessions(
+        ctx.shop,
+        "embedded_401_bounce",
+      );
+      logSessionPersistenceEvent("prisma_session_lookup_failed", ctx.shop, {
+        event: "embedded_401_sessions_cleared",
+        deletedCount,
+        offlineSessionId: getOfflineSessionId(ctx.shop),
+      });
+    }
     throw response;
   }
 
@@ -1015,7 +1078,7 @@ export function redirectToLoginWithEmbeddedContext(
 }
 
 type AdminAuthResult = {
-  session: { shop: string };
+  session: { shop: string; id: string; isOnline: boolean };
 };
 
 export async function authenticateEmbeddedAdmin<T extends AdminAuthResult>(
@@ -1036,15 +1099,29 @@ export async function authenticateEmbeddedAdmin<T extends AdminAuthResult>(
     });
   }
 
+  if (ctx.embedded && ctx.shop) {
+    logSessionPersistenceEvent("offline_session_id", ctx.shop, {
+      sessionId: getOfflineSessionId(ctx.shop),
+    });
+    await logShopSessionSnapshot(ctx.shop);
+  }
+
   try {
     const result = await authenticateAdmin(request);
     logEmbeddedAuthEvent("session_restored", request, {
       sessionShop: result.session.shop,
+      sessionId: result.session.id,
+      isOnline: result.session.isOnline,
+    });
+    logSessionPersistenceEvent("prisma_session_lookup", result.session.shop, {
+      sessionId: result.session.id,
+      found: true,
+      source: "authenticate_admin_success",
     });
     return result;
   } catch (error) {
     if (isUnauthorizedResponse(error)) {
-      handleEmbeddedUnauthorized(request, error);
+      await handleEmbeddedUnauthorized(request, error);
     }
     if (isRedirectResponse(error) && isLoginRedirect(error)) {
       redirectToLoginWithEmbeddedContext(request);
