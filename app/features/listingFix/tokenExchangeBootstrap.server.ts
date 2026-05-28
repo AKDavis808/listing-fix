@@ -8,9 +8,9 @@ import {
   logSessionPersistenceEvent,
 } from "./sessionPersistence.server";
 import {
-  resolveSessionTokenForExchange,
-  shouldAttemptTokenExchangeBootstrap,
-  type SessionTokenSource,
+  resolveBootstrapRequestContext,
+  type BootstrapDecision,
+  type BootstrapRequestContext,
 } from "./sessionTokenInput.server";
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
@@ -54,31 +54,37 @@ function rememberRejectedToken(shop: string, token: string): void {
   );
 }
 
-function logTokenExchangeDiagnostics(
+function logBootstrapDecision(
   shop: string,
-  source: SessionTokenSource,
-  shape: ReturnType<typeof resolveSessionTokenForExchange>["shape"],
+  context: BootstrapRequestContext,
   extra?: Record<string, string | number | boolean | null | undefined>,
 ): void {
-  logAuthDiagnosticOnce(`token_exchange_diag:${shop}:${source}`, () => {
+  logAuthDiagnosticOnce(`bootstrap_decision:${shop}:${context.decision}`, () => {
     logListingFixEvent({
       action: "oauth_start",
       shop,
       meta: {
-        event: "token_exchange_token_diagnostics",
-        token_exchange_token_source: source,
-        token_exchange_token_shape_dotCount: shape.dotCount,
-        token_exchange_token_shape_length: shape.length,
-        token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
-        token_exchange_token_shape_jwtSectionCount: shape.jwtSectionCount,
-        token_exchange_token_prefix12: shape.tokenPrefix12,
-        token_exchange_token_typeof: shape.tokenTypeof,
-        token_exchange_token_includesWhitespace: shape.includesWhitespace,
-        token_exchange_token_shape_startsWithBearer: shape.startsWithBearer,
+        event: "token_exchange_bootstrap_decision",
+        bootstrap_decision: context.decision,
+        hasUrlIdToken: Boolean(context.urlIdToken),
+        hasAuthorizationHeader: context.hasAuthorizationHeader,
+        isBounceRequest: context.isBounceRequest,
+        token_exchange_token_shape_dotCount: context.shape.dotCount,
+        token_exchange_token_shape_hasThreeJwtSections:
+          context.shape.hasThreeJwtSections,
+        token_exchange_token_shape_jwtSectionCount: context.shape.jwtSectionCount,
+        token_exchange_token_shape_length: context.shape.length,
+        token_exchange_token_prefix12: context.shape.tokenPrefix12,
         ...extra,
       },
     });
   });
+}
+
+function shouldPerformTokenExchange(
+  decision: BootstrapDecision,
+): decision is "bootstrap_from_url_id_token" {
+  return decision === "bootstrap_from_url_id_token";
 }
 
 export async function bootstrapOfflineSessionIfNeeded(
@@ -86,10 +92,6 @@ export async function bootstrapOfflineSessionIfNeeded(
   api: Shopify,
   sessionStorage: SessionStorage,
 ): Promise<void> {
-  if (!shouldAttemptTokenExchangeBootstrap(request)) {
-    return;
-  }
-
   const shop = new URL(request.url).searchParams.get("shop");
   if (!shop) return;
 
@@ -97,23 +99,23 @@ export async function bootstrapOfflineSessionIfNeeded(
   const existingRow = await db.session.findUnique({
     where: { id: offlineSessionId },
   });
+  const hasExistingOfflineSession = isOfflineRowUsable(existingRow);
 
-  if (isOfflineRowUsable(existingRow)) {
+  const context = resolveBootstrapRequestContext(
+    request,
+    hasExistingOfflineSession,
+  );
+
+  if (!shouldPerformTokenExchange(context.decision)) {
+    logBootstrapDecision(shop, context, { offlineSessionId });
     return;
   }
 
-  const { token, source, shape } = resolveSessionTokenForExchange(request);
-
+  const token = context.token;
   if (!token) {
-    logTokenExchangeDiagnostics(shop, source, shape, {
+    logBootstrapDecision(shop, context, {
       offlineSessionId,
-      skipped: true,
-      reason:
-        source === "url_id_token"
-          ? "url_id_token_invalid_shape"
-          : source === "authorization_header"
-            ? "authorization_header_invalid_shape"
-            : "missing_session_token",
+      reason: "missing_normalized_url_id_token",
     });
     return;
   }
@@ -129,25 +131,27 @@ export async function bootstrapOfflineSessionIfNeeded(
 
   bootstrapInFlight.add(inFlightKey);
 
-  logTokenExchangeDiagnostics(shop, source, shape, {
+  logBootstrapDecision(shop, context, {
     offlineSessionId,
+    token_exchange_token_source: "url_id_token",
   });
 
-  logAuthDiagnosticOnce(`token_exchange_start:${shop}:${source}`, () => {
+  logAuthDiagnosticOnce(`token_exchange_start:${shop}:url_id_token`, () => {
     logSessionPersistenceEvent("token_exchange_start", shop, {
       offlineSessionId,
-      token_exchange_token_source: source,
-      token_exchange_token_shape_dotCount: shape.dotCount,
-      token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
-      token_exchange_token_shape_jwtSectionCount: shape.jwtSectionCount,
-      token_exchange_token_shape_length: shape.length,
+      bootstrap_decision: context.decision,
+      token_exchange_token_source: "url_id_token",
+      token_exchange_token_shape_dotCount: context.shape.dotCount,
+      token_exchange_token_shape_hasThreeJwtSections:
+        context.shape.hasThreeJwtSections,
+      token_exchange_token_shape_jwtSectionCount: context.shape.jwtSectionCount,
+      token_exchange_token_shape_length: context.shape.length,
     });
   });
 
   try {
-    const normalizedToken = token;
     const { session } = await api.auth.tokenExchange({
-      sessionToken: normalizedToken,
+      sessionToken: token,
       shop,
       requestedTokenType: RequestedTokenType.OfflineAccessToken,
       expiring: true,
@@ -158,22 +162,26 @@ export async function bootstrapOfflineSessionIfNeeded(
     logSessionPersistenceEvent("token_exchange_success", shop, {
       sessionId: session.id,
       stored,
-      token_exchange_token_source: source,
-      token_exchange_token_shape_dotCount: shape.dotCount,
-      token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
-      token_exchange_token_shape_length: shape.length,
+      bootstrap_decision: context.decision,
+      token_exchange_token_source: "url_id_token",
+      token_exchange_token_shape_dotCount: context.shape.dotCount,
+      token_exchange_token_shape_hasThreeJwtSections:
+        context.shape.hasThreeJwtSections,
+      token_exchange_token_shape_length: context.shape.length,
     });
   } catch (error) {
     rememberRejectedToken(shop, token);
 
-    logAuthDiagnosticOnce(`token_exchange_failure:${shop}:${source}`, () => {
+    logAuthDiagnosticOnce(`token_exchange_failure:${shop}:url_id_token`, () => {
       logSessionPersistenceEvent("token_exchange_failure", shop, {
         offlineSessionId,
-        token_exchange_token_source: source,
-        token_exchange_token_shape_dotCount: shape.dotCount,
-        token_exchange_token_shape_hasThreeJwtSections: shape.hasThreeJwtSections,
-        token_exchange_token_shape_jwtSectionCount: shape.jwtSectionCount,
-        token_exchange_token_shape_length: shape.length,
+        bootstrap_decision: context.decision,
+        token_exchange_token_source: "url_id_token",
+        token_exchange_token_shape_dotCount: context.shape.dotCount,
+        token_exchange_token_shape_hasThreeJwtSections:
+          context.shape.hasThreeJwtSections,
+        token_exchange_token_shape_jwtSectionCount: context.shape.jwtSectionCount,
+        token_exchange_token_shape_length: context.shape.length,
         message: sanitizeErrorMessage(error),
       });
     });
