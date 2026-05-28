@@ -1,10 +1,14 @@
 import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
+  shopifyApi,
+} from "@shopify/shopify-api";
+import {
   AppDistribution,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import prisma from "./db.server";
+import { logAuthDiagnosticOnce } from "./features/listingFix/authDiagnostics.server";
 import {
   authenticateEmbeddedAdmin,
   loginWithEmbeddedContext,
@@ -15,38 +19,75 @@ import {
   logSessionPersistenceEvent,
   verifyPrismaSessionPersisted,
 } from "./features/listingFix/sessionPersistence.server";
+import { bootstrapOfflineSessionIfNeeded } from "./features/listingFix/tokenExchangeBootstrap.server";
 import { logListingFixEvent } from "./features/listingFix/telemetry";
 
+const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
+const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
+const apiSecretKey = process.env.SHOPIFY_API_SECRET?.trim() ?? "";
+const scopes = process.env.SCOPES?.split(",");
+const useOnlineTokens = false;
+const expiringOfflineAccessTokens = true;
+const distribution = AppDistribution.AppStore;
+
+function createListingFixShopifyApi() {
+  if (!appUrl) {
+    throw new Error("SHOPIFY_APP_URL is required.");
+  }
+
+  const url = new URL(appUrl);
+  return shopifyApi({
+    apiKey,
+    apiSecretKey,
+    apiVersion: ApiVersion.October25,
+    scopes,
+    hostName: url.host,
+    hostScheme: url.protocol.replace(":", "") as "http" | "https",
+    isEmbeddedApp: true,
+    isCustomStoreApp: false,
+  });
+}
+
+const listingFixApi = createListingFixShopifyApi();
+const sessionStorage = new InstrumentedPrismaSessionStorage(prisma);
+
+logAuthDiagnosticOnce("shopify_auth_config", () => {
+  console.info("[ListingFix][session_restored] Shopify auth config", {
+    appUrl,
+    distribution,
+    useOnlineTokens,
+    expiringOfflineAccessTokens,
+    sessionStorage: "InstrumentedPrismaSessionStorage",
+    hasApiKey: Boolean(apiKey),
+    hasApiSecret: Boolean(apiSecretKey),
+    scopesConfigured: Boolean(scopes?.length),
+    nodeEnv: process.env.NODE_ENV ?? "development",
+  });
+});
+
 const shopify = shopifyApp({
-  apiKey: process.env.SHOPIFY_API_KEY?.trim(),
-  apiSecretKey: process.env.SHOPIFY_API_SECRET?.trim() || "",
+  apiKey,
+  apiSecretKey,
   apiVersion: ApiVersion.October25,
-  scopes: process.env.SCOPES?.split(","),
-  appUrl: normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL),
+  scopes,
+  appUrl,
   authPathPrefix: "/auth",
-  sessionStorage: new InstrumentedPrismaSessionStorage(prisma),
-  distribution: AppDistribution.AppStore,
+  sessionStorage,
+  distribution,
+  useOnlineTokens,
   future: {
-    expiringOfflineAccessTokens: true,
+    expiringOfflineAccessTokens,
   },
   hooks: {
     afterAuth: async ({ session }) => {
-      logSessionPersistenceEvent("oauth_callback_completed", session.shop, {
-        sessionId: session.id,
-        isOnline: session.isOnline,
-      });
-
       const verified = await verifyPrismaSessionPersisted(session);
 
-      logListingFixEvent({
-        action: "oauth_complete",
-        shop: session.shop,
-        meta: {
-          event: "oauth_callback_session_stored",
+      logAuthDiagnosticOnce(`after_auth:${session.shop}`, () => {
+        logSessionPersistenceEvent("oauth_callback_completed", session.shop, {
           sessionId: session.id,
           isOnline: session.isOnline,
           prismaVerified: verified,
-        },
+        });
       });
     },
   },
@@ -60,17 +101,28 @@ export const apiVersion = ApiVersion.October25;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 export const authenticate = {
   ...shopify.authenticate,
-  admin: (request: Request) =>
-    authenticateEmbeddedAdmin(request, shopify.authenticate.admin.bind(shopify.authenticate)),
+  admin: async (request: Request) => {
+    await bootstrapOfflineSessionIfNeeded(
+      request,
+      listingFixApi,
+      sessionStorage,
+    );
+    return authenticateEmbeddedAdmin(
+      request,
+      shopify.authenticate.admin.bind(shopify.authenticate),
+    );
+  },
 };
 export const unauthenticated = shopify.unauthenticated;
 export const login = (request: Request) => {
   const shop = new URL(request.url).searchParams.get("shop");
-  logSessionPersistenceEvent("oauth_begin", shop, {
-    route: "auth.login",
-    method: request.method,
+  logAuthDiagnosticOnce(`oauth_begin:${shop ?? "unknown"}`, () => {
+    logSessionPersistenceEvent("oauth_begin", shop, {
+      route: "auth.login",
+      method: request.method,
+    });
   });
   return loginWithEmbeddedContext(request, shopify.login.bind(shopify));
 };
 export const registerWebhooks = shopify.registerWebhooks;
-export const sessionStorage = shopify.sessionStorage;
+export { sessionStorage };

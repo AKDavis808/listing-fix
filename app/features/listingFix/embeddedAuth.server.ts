@@ -1,11 +1,7 @@
 import { redirect } from "react-router";
 
-import { deleteShopSessions } from "./shopSessions.server";
-import {
-  getOfflineSessionId,
-  logSessionPersistenceEvent,
-  logShopSessionSnapshot,
-} from "./sessionPersistence.server";
+import { logAuthDiagnosticOnce } from "./authDiagnostics.server";
+import { logOfflineSessionMissingOnce } from "./sessionPersistence.server";
 import { logListingFixEvent } from "./telemetry";
 
 export type EmbeddedAuthEvent =
@@ -69,39 +65,6 @@ export function logEmbeddedAuthEvent(
 export function normalizeShopifyAppUrl(raw: string | undefined): string {
   if (!raw) return "";
   return raw.trim().replace(/\/$/, "");
-}
-
-export function validateProductionShopifyEnv(): void {
-  const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
-  const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
-  const apiSecret = process.env.SHOPIFY_API_SECRET?.trim() ?? "";
-  const scopes = process.env.SCOPES?.trim() ?? "";
-
-  if (!appUrl) {
-    console.error("[ListingFix][session_missing] SHOPIFY_APP_URL is not set.");
-    return;
-  }
-
-  if (/trycloudflare|cloudflare\.com|ngrok|localhost(?!\.)/i.test(appUrl)) {
-    console.warn(
-      "[ListingFix][auth_redirect] SHOPIFY_APP_URL looks non-production:",
-      appUrl,
-    );
-  }
-
-  if (!apiKey || !apiSecret) {
-    console.error(
-      "[ListingFix][session_missing] Shopify API credentials are incomplete.",
-    );
-  }
-
-  console.info("[ListingFix][session_restored] Shopify env snapshot", {
-    appUrl,
-    hasApiKey: Boolean(apiKey),
-    hasApiSecret: Boolean(apiSecret),
-    scopesConfigured: Boolean(scopes),
-    nodeEnv: process.env.NODE_ENV ?? "development",
-  });
 }
 
 function isUnauthorizedResponse(error: unknown): error is Response {
@@ -404,7 +367,7 @@ export function renderSessionTokenBouncePage(request: Request): never {
       (function () {
         var REAUTH_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
         var RETRY_SESSION_HEADER = "X-Shopify-Retry-Invalid-Session-Request";
-        var MAX_BOUNCE_RETRIES = 3;
+        var MAX_BOUNCE_RETRIES = 1;
         var pageParams = new URLSearchParams(location.search);
         var appOrigin = location.origin;
         var pendingReconnectUrl = null;
@@ -938,30 +901,22 @@ export async function handleEmbeddedUnauthorized(
 ): Promise<never> {
   const ctx = extractRequestContext(request);
 
-  logListingFixEvent({
-    action: "auth_401_caught",
-    shop: ctx.shop,
-    meta: {
-      pathname: ctx.pathname,
-      embedded: ctx.embedded,
-      hasHost: Boolean(ctx.host),
-      hasSessionTokenHeader: ctx.hasSessionTokenHeader,
-      hasIdToken: ctx.hasIdToken,
-    },
+  logAuthDiagnosticOnce("auth_401_caught", () => {
+    logListingFixEvent({
+      action: "auth_401_caught",
+      shop: ctx.shop,
+      meta: {
+        pathname: ctx.pathname,
+        embedded: ctx.embedded,
+        hasHost: Boolean(ctx.host),
+        hasSessionTokenHeader: ctx.hasSessionTokenHeader,
+        hasIdToken: ctx.hasIdToken,
+        bounce: isEmbeddedSessionTokenFetch(request),
+      },
+    });
   });
 
   if (isEmbeddedSessionTokenFetch(request)) {
-    if (ctx.shop) {
-      const deletedCount = await deleteShopSessions(
-        ctx.shop,
-        "embedded_401_bounce",
-      );
-      logSessionPersistenceEvent("prisma_session_lookup_failed", ctx.shop, {
-        event: "embedded_401_sessions_cleared",
-        deletedCount,
-        offlineSessionId: getOfflineSessionId(ctx.shop),
-      });
-    }
     throw response;
   }
 
@@ -1087,40 +1042,21 @@ export async function authenticateEmbeddedAdmin<T extends AdminAuthResult>(
 ): Promise<T> {
   const ctx = extractRequestContext(request);
 
-  logEmbeddedAuthEvent("iframe_request", request);
-
-  if (ctx.embedded) {
-    logEmbeddedAuthEvent("embedded_detected", request);
-  }
-
-  if (ctx.embedded && (!ctx.shop || !ctx.host)) {
-    logEmbeddedAuthEvent("session_missing", request, {
-      reason: "missing_shop_or_host",
-    });
-  }
-
-  if (ctx.embedded && ctx.shop) {
-    logSessionPersistenceEvent("offline_session_id", ctx.shop, {
-      sessionId: getOfflineSessionId(ctx.shop),
-    });
-    await logShopSessionSnapshot(ctx.shop);
-  }
-
   try {
     const result = await authenticateAdmin(request);
-    logEmbeddedAuthEvent("session_restored", request, {
-      sessionShop: result.session.shop,
-      sessionId: result.session.id,
-      isOnline: result.session.isOnline,
-    });
-    logSessionPersistenceEvent("prisma_session_lookup", result.session.shop, {
-      sessionId: result.session.id,
-      found: true,
-      source: "authenticate_admin_success",
+    logAuthDiagnosticOnce(`session_restored:${result.session.shop}`, () => {
+      logEmbeddedAuthEvent("session_restored", request, {
+        sessionShop: result.session.shop,
+        sessionId: result.session.id,
+        isOnline: result.session.isOnline,
+      });
     });
     return result;
   } catch (error) {
     if (isUnauthorizedResponse(error)) {
+      if (ctx.shop) {
+        logOfflineSessionMissingOnce(ctx.shop);
+      }
       await handleEmbeddedUnauthorized(request, error);
     }
     if (isRedirectResponse(error) && isLoginRedirect(error)) {
@@ -1187,5 +1123,3 @@ export async function loginWithEmbeddedContext(
   }
 }
 
-// Side-effect validation on module load in production.
-validateProductionShopifyEnv();
