@@ -46,6 +46,19 @@ export function buildOAuthAuthUrl(request: Request): string {
   return `/auth${query ? `?${query}` : ""}`;
 }
 
+export function shouldDeferToEmbeddedTokenExchange(request: Request): boolean {
+  if (!isEmbeddedOAuthRequest(request)) {
+    return false;
+  }
+
+  const url = new URL(request.url);
+
+  return (
+    Boolean(url.searchParams.get("id_token")) ||
+    Boolean(request.headers.get("authorization"))
+  );
+}
+
 export async function ensureOfflineSessionOrRedirectToOAuth(
   request: Request,
   reason: string,
@@ -63,6 +76,17 @@ export async function ensureOfflineSessionOrRedirectToOAuth(
 
   if (isOAuthInProgress(request)) {
     logOAuthInProgressSkip(request, shop);
+    return;
+  }
+
+  if (shouldDeferToEmbeddedTokenExchange(request)) {
+    recordAuthFlowStep(request, "embedded_token_exchange_deferred", {
+      reason,
+      shop,
+      hasIdToken: Boolean(url.searchParams.get("id_token")),
+      hasAuthorizationHeader: Boolean(request.headers.get("authorization")),
+      pathname: url.pathname,
+    });
     return;
   }
 
