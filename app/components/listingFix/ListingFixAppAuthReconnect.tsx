@@ -47,6 +47,7 @@ export function ListingFixAppAuthReconnect() {
         pathname: location.pathname,
         embedded: isEmbedded,
         hasShop,
+        event: "embedded_session_missing_offline_session",
       },
     });
   }, [error, hasShop, isEmbedded, location.pathname, shop]);
@@ -55,12 +56,15 @@ export function ListingFixAppAuthReconnect() {
     return null;
   }
 
+  const recoveryLoginUrl = `/auth/login${location.search}`;
+
   return (
     <PolarisAppProvider i18n={translations}>
-      <Page title="ListingFix">
+      <Page title="Reconnect ListingFix">
         <ListingFixEmbeddedAuthFallback
           isEmbedded={isEmbedded}
           hasShop={hasShop}
+          oauthInstallUrl={isEmbedded && hasShop ? recoveryLoginUrl : null}
         />
       </Page>
     </PolarisAppProvider>

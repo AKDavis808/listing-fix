@@ -5,12 +5,27 @@ import { LEGAL_LINKS } from "../../features/listingFix/trustCopy";
 export function ListingFixEmbeddedAuthFallback({
   isEmbedded,
   hasShop,
+  oauthInstallUrl,
 }: {
   isEmbedded: boolean;
   hasShop: boolean;
+  oauthInstallUrl?: string | null;
 }) {
   const handleReconnect = () => {
     if (typeof window === "undefined") return;
+
+    if (oauthInstallUrl) {
+      console.log("session_token_reconnect_clicked", oauthInstallUrl);
+      console.log("session_token_top_navigation_start", oauthInstallUrl);
+      const target = window.top && window.top !== window ? window.top : window;
+      if (oauthInstallUrl.startsWith("/")) {
+        target.location.assign(oauthInstallUrl);
+      } else {
+        target.location.href = oauthInstallUrl;
+      }
+      return;
+    }
+
     window.location.reload();
   };
 
@@ -20,11 +35,12 @@ export function ListingFixEmbeddedAuthFallback({
         <>
           <Text as="p" variant="bodyMd">
             ListingFix couldn&apos;t connect to your Shopify session inside Admin.
-            This usually resolves with a quick refresh.
+            Shopify needs to refresh your app connection before ListingFix can
+            continue.
           </Text>
           <Text as="p" variant="bodySm" tone="subdued">
             {hasShop
-              ? "We detected your shop and will try to reconnect automatically."
+              ? "Click Reconnect in Shopify to restore your ListingFix session."
               : "Open ListingFix again from Apps in Shopify Admin if the issue continues."}
           </Text>
         </>
@@ -37,7 +53,7 @@ export function ListingFixEmbeddedAuthFallback({
       {isEmbedded ? (
         <BlockStack gap="200">
           <Button variant="primary" onClick={handleReconnect}>
-            Reconnect in Shopify Admin
+            Reconnect in Shopify
           </Button>
           <Button url={LEGAL_LINKS.support} target="_blank" variant="plain">
             Visit support

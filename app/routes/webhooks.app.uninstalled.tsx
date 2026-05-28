@@ -1,17 +1,34 @@
 import type { ActionFunctionArgs } from "react-router";
+
+import { deleteShopSessions } from "../features/listingFix/shopSessions.server";
+import { logListingFixEvent } from "../features/listingFix/telemetry";
 import { authenticate } from "../shopify.server";
-import db from "../db.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { shop, session, topic } = await authenticate.webhook(request);
+  logListingFixEvent({
+    action: "oauth_complete",
+    meta: { event: "uninstall_webhook_received" },
+  });
 
-  console.log(`Received ${topic} webhook for ${shop}`);
+  try {
+    const { shop, topic } = await authenticate.webhook(request);
 
-  // Webhook requests can trigger multiple times and after an app has already been uninstalled.
-  // If this webhook already ran, the session may have been deleted previously.
-  if (session) {
-    await db.session.deleteMany({ where: { shop } });
+    console.log(`Received ${topic} webhook for ${shop}`);
+
+    await deleteShopSessions(shop, "app/uninstalled");
+
+    return new Response(null, { status: 200 });
+  } catch (error) {
+    if (error instanceof Response && error.status === 401) {
+      logListingFixEvent({
+        action: "session_missing",
+        meta: {
+          event: "uninstall_webhook_auth_failed",
+          status: 401,
+        },
+      });
+    }
+
+    throw error;
   }
-
-  return new Response();
 };

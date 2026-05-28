@@ -117,6 +117,22 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+export function buildEmbeddedOAuthInstallUrl(shop: string): string {
+  const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
+  const scopes = process.env.SCOPES?.trim() ?? "";
+  const shopWithoutProtocol = shop.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const shopWithDomain =
+    shopWithoutProtocol.indexOf(".") === -1
+      ? `${shopWithoutProtocol}.myshopify.com`
+      : shopWithoutProtocol;
+  const params = new URLSearchParams({
+    client_id: apiKey,
+    scope: scopes,
+  });
+
+  return `https://${shopWithDomain}/admin/oauth/install?${params.toString()}`;
+}
+
 const DEFAULT_APP_RELOAD_PATH = "/app";
 const SESSION_TOKEN_RELOAD_PRESERVED_PARAMS = [
   "embedded",
@@ -238,6 +254,7 @@ export function renderSessionTokenBouncePage(request: Request): never {
   const url = new URL(request.url);
   const shop = url.searchParams.get("shop");
   const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
+  const oauthScopes = process.env.SCOPES?.trim() ?? "";
   const reloadResolution = resolveSessionTokenReloadTarget(request);
   const { reloadUrl, defaulted, preventedSelfReload } = reloadResolution;
 
@@ -383,6 +400,26 @@ export function renderSessionTokenBouncePage(request: Request): never {
         var reloadDefaulted = ${JSON.stringify(defaulted)};
         var reloadSelfLoopPrevented = ${JSON.stringify(preventedSelfReload)};
         var shopifyReload = ${JSON.stringify(reloadUrl ?? "")};
+        var oauthScopes = ${JSON.stringify(oauthScopes)};
+        var oauthApiKey = ${JSON.stringify(apiKey)};
+
+        function buildOAuthInstallUrl(shop) {
+          if (!shop || !oauthApiKey) return "";
+          var shopWithoutProtocol = String(shop)
+            .replace(/^https?:\\/\\//, "")
+            .replace(/\\/$/, "");
+          var shopWithDomain =
+            shopWithoutProtocol.indexOf(".") === -1
+              ? shopWithoutProtocol + ".myshopify.com"
+              : shopWithoutProtocol;
+          var params = new URLSearchParams({
+            client_id: oauthApiKey,
+            scope: oauthScopes,
+          });
+          return (
+            "https://" + shopWithDomain + "/admin/oauth/install?" + params.toString()
+          );
+        }
 
         function logError(reason) {
           console.log("session_token_error", reason);
@@ -722,7 +759,17 @@ export function renderSessionTokenBouncePage(request: Request): never {
             navigationTarget &&
             navigationTarget.reason === "unauthorized_without_reauth_url"
           ) {
-            logError(navigationTarget.reason);
+            var shop = pageParams.get("shop");
+            var oauthUrl = buildOAuthInstallUrl(shop);
+            if (oauthUrl) {
+              console.log("session_token_user_action_required", {
+                url: oauthUrl,
+                reason: "missing_offline_session",
+              });
+              showReconnectPrompt(oauthUrl, "missing_offline_session");
+            } else {
+              logError(navigationTarget.reason);
+            }
             return;
           }
 
@@ -847,10 +894,44 @@ export function handleEmbeddedUnauthorized(
       embedded: ctx.embedded,
       hasHost: Boolean(ctx.host),
       hasSessionTokenHeader: ctx.hasSessionTokenHeader,
+      hasIdToken: ctx.hasIdToken,
     },
   });
 
+  if (isEmbeddedSessionTokenFetch(request)) {
+    throw response;
+  }
+
+  if (
+    ctx.embedded &&
+    ctx.shop &&
+    (ctx.hasSessionTokenHeader || ctx.hasIdToken)
+  ) {
+    logListingFixEvent({
+      action: "session_missing",
+      shop: ctx.shop,
+      meta: {
+        event: "embedded_session_missing_offline_session",
+        pathname: ctx.pathname,
+        hasHost: Boolean(ctx.host),
+      },
+    });
+  }
+
   const reauthUrl = response.headers.get(REAUTH_URL_HEADER);
+  if (reauthUrl && ctx.embedded && ctx.shop) {
+    logListingFixEvent({
+      action: "auth_redirect_preserved",
+      shop: ctx.shop,
+      meta: {
+        source: "reauth_url_header",
+        target: LOGIN_PATH,
+        reauthUrl,
+      },
+    });
+    redirectToLoginWithEmbeddedContext(request);
+  }
+
   if (reauthUrl) {
     const requestUrl = new URL(request.url);
     const target = new URL(reauthUrl, requestUrl.origin);
@@ -871,17 +952,6 @@ export function handleEmbeddedUnauthorized(
     });
 
     throw redirect(target.toString());
-  }
-
-  // App Bridge bounce fetches /app with Authorization + X-Shopify-Bounce.
-  // Redirecting those 401s back to /auth/session-token breaks document.write reload.
-  if (
-    ctx.embedded &&
-    ctx.shop &&
-    ctx.host &&
-    !isEmbeddedSessionTokenFetch(request)
-  ) {
-    redirectToSessionTokenBounce(request);
   }
 
   if (ctx.embedded && ctx.shop) {

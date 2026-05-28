@@ -8,6 +8,7 @@ import translations from "@shopify/polaris/locales/en.json";
 
 import { ListingFixEmbeddedAuthFallback } from "../../components/listingFix/ListingFixEmbeddedAuthFallback";
 import {
+  buildEmbeddedOAuthInstallUrl,
   hasShopParam,
   isEmbeddedLoginRequest,
   logEmbeddedAuthEvent,
@@ -34,6 +35,32 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     });
   }
 
+  const shop = new URL(request.url).searchParams.get("shop");
+
+  if (isEmbedded && hasShop && shop) {
+    logEmbeddedAuthEvent("session_missing", request, {
+      route: "auth.login",
+      reason: "embedded_oauth_recovery",
+    });
+    logListingFixEvent({
+      action: "session_missing",
+      shop,
+      meta: {
+        event: "embedded_session_missing_offline_session",
+        route: "auth.login",
+      },
+    });
+
+    return {
+      errors: {},
+      isEmbedded,
+      hasShop,
+      // eslint-disable-next-line no-undef
+      apiKey: process.env.SHOPIFY_API_KEY || "",
+      oauthInstallUrl: buildEmbeddedOAuthInstallUrl(shop),
+    };
+  }
+
   const errors = loginErrorMessage(await login(request));
 
   return {
@@ -42,6 +69,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     hasShop,
     // eslint-disable-next-line no-undef
     apiKey: process.env.SHOPIFY_API_KEY || "",
+    oauthInstallUrl: null as string | null,
   };
 };
 
@@ -58,6 +86,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     hasShop: hasShopParam(request),
     // eslint-disable-next-line no-undef
     apiKey: process.env.SHOPIFY_API_KEY || "",
+    oauthInstallUrl: null as string | null,
   };
 };
 
@@ -66,7 +95,7 @@ export default function Auth() {
   const actionData = useActionData<typeof action>();
   const [shop, setShop] = useState("");
   const payload = actionData || loaderData;
-  const { errors, isEmbedded, hasShop, apiKey } = payload;
+  const { errors, isEmbedded, hasShop, apiKey, oauthInstallUrl } = payload;
 
   return (
     <AppProvider embedded={isEmbedded} apiKey={apiKey}>
@@ -77,6 +106,7 @@ export default function Auth() {
               <ListingFixEmbeddedAuthFallback
                 isEmbedded={isEmbedded}
                 hasShop={hasShop}
+                oauthInstallUrl={oauthInstallUrl}
               />
               {errors.shop ? (
                 <p style={{ color: "var(--p-color-text-critical)" }}>{errors.shop}</p>
