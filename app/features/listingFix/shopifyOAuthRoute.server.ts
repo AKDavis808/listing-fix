@@ -15,6 +15,11 @@ import {
   logOAuthCallbackValidationSuccess,
 } from "./oauthCallbackDiagnostics.server";
 import { listingFixShopifyApi } from "./shopifyApi.server";
+import {
+  appendClearOAuthInProgressCookie,
+  escapeEmbeddedOAuthBegin,
+  shouldEscapeEmbeddedOAuthBegin,
+} from "./embeddedOAuthEscape.server";
 import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
 import { getOfflineSessionId, verifyPrismaSessionPersisted } from "./sessionPersistence.server";
 
@@ -138,6 +143,8 @@ export async function handleOAuthCallbackRoute(
         ? headers
         : new Headers(headers as Record<string, string>);
 
+    appendClearOAuthInProgressCookie(responseHeaders);
+
     throw redirect(redirectUrl, { headers: responseHeaders });
   } catch (error) {
     if (error instanceof Response) {
@@ -204,6 +211,10 @@ export async function handleOAuthAuthRoute(
       redirectUri,
       deps.authCallbackPath,
     );
+
+    if (shouldEscapeEmbeddedOAuthBegin(request)) {
+      escapeEmbeddedOAuthBegin(request, beginResponse, shop);
+    }
 
     return beginResponse;
   }

@@ -1,6 +1,11 @@
 import { redirect } from "react-router";
 
 import db from "../../db.server";
+import {
+  buildOAuthInProgressCookie,
+  isOAuthInProgress,
+  logOAuthInProgressSkip,
+} from "./embeddedOAuthEscape.server";
 import { logRedirectToOAuth } from "./oauthSessionDiagnostics.server";
 import { getOfflineSessionId } from "./sessionPersistence.server";
 
@@ -47,10 +52,19 @@ export async function ensureOfflineSessionOrRedirectToOAuth(
     return;
   }
 
+  if (isOAuthInProgress(request)) {
+    logOAuthInProgressSkip(request, shop);
+    return;
+  }
+
   const offlineSessionId = getOfflineSessionId(shop);
   const target = buildOAuthAuthUrl(request);
 
   logRedirectToOAuth(request, shop, offlineSessionId, reason, target);
 
-  throw redirect(target);
+  throw redirect(target, {
+    headers: {
+      "set-cookie": buildOAuthInProgressCookie(),
+    },
+  });
 }
