@@ -2,6 +2,10 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import { logOAuthRouteEntered } from "../../features/listingFix/oauthSessionDiagnostics.server";
+import {
+  isEmbeddedOAuthRequest,
+  logOAuthEmbeddedDetected,
+} from "../../features/listingFix/embeddedOAuthEscape.server";
 import { handleShopifyOAuthAuthRoute } from "../../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -11,7 +15,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   logOAuthRouteEntered(url.pathname, shop, {
     route: "auth._index",
     hasShop: Boolean(shop),
+    embedded: url.searchParams.get("embedded") === "1",
+    hasHost: Boolean(url.searchParams.get("host")),
+    isEmbeddedOAuthRequest: isEmbeddedOAuthRequest(request),
   });
+
+  if (isEmbeddedOAuthRequest(request)) {
+    logOAuthEmbeddedDetected(request, shop);
+  }
 
   const oauthResponse = await handleShopifyOAuthAuthRoute(request);
   if (oauthResponse) {

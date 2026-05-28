@@ -143,6 +143,7 @@ export function logOAuthBeginResponse(
       redirectUri,
       callbackPath,
       auth_response_location: location,
+      oauth_redirect_location: location,
       locationPresent: Boolean(location),
       locationHost: location ? safeUrlHost(location) : null,
       setCookiePresent: Boolean(setCookie),

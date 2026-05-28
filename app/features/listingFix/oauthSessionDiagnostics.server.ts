@@ -1,6 +1,7 @@
 import type { Session } from "@shopify/shopify-api";
 
 import db from "../../db.server";
+import { isEmbeddedOAuthRequest } from "./embeddedOAuthEscape.server";
 import { getOfflineSessionId } from "./sessionPersistence.server";
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
@@ -99,6 +100,7 @@ export function logRedirectToOAuth(
       offlineSessionId,
       embedded: url.searchParams.get("embedded") === "1",
       hasHost: Boolean(url.searchParams.get("host")),
+      isEmbeddedOAuthRequest: isEmbeddedOAuthRequest(request),
     },
   });
 }

@@ -18,6 +18,7 @@ import { listingFixShopifyApi } from "./shopifyApi.server";
 import {
   appendClearOAuthInProgressCookie,
   escapeEmbeddedOAuthBegin,
+  logOAuthEmbeddedDetected,
   shouldEscapeEmbeddedOAuthBegin,
 } from "./embeddedOAuthEscape.server";
 import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
@@ -186,6 +187,10 @@ export async function handleOAuthAuthRoute(
       event: "auth_begin_entered",
       route: "oauth.begin",
     });
+
+    if (shouldEscapeEmbeddedOAuthBegin(request)) {
+      logOAuthEmbeddedDetected(request, shop);
+    }
 
     const redirectUri = buildRedirectUri(deps.appUrl, deps.authCallbackPath);
 
