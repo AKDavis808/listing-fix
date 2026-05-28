@@ -224,7 +224,7 @@ export function renderSessionTokenBouncePage(request: Request): never {
   <body>
     <div id="listingfix-reconnect" hidden>
       <h1>Reconnect ListingFix</h1>
-      <p>Shopify needs to refresh your app connection.</p>
+      <p>Shopify needs to refresh your app connection before ListingFix can continue.</p>
       <button type="button" id="listingfix-reconnect-button">
         Reconnect in Shopify
       </button>
@@ -253,6 +253,32 @@ export function renderSessionTokenBouncePage(request: Request): never {
           }
         }
 
+        function isCrossOriginNavigationTarget(urlString) {
+          try {
+            var parsed = new URL(urlString, appOrigin);
+            if (parsed.origin !== appOrigin) {
+              return true;
+            }
+            if (parsed.hostname === "admin.shopify.com") {
+              return true;
+            }
+            if (/\\.myshopify\\.com$/i.test(parsed.hostname)) {
+              return true;
+            }
+            if (isOAuthInstallUrl(urlString)) {
+              return true;
+            }
+            if (/oauth\\/install|oauth\\/authorize|reauthorize/i.test(
+              parsed.pathname + parsed.search,
+            )) {
+              return true;
+            }
+            return false;
+          } catch (error) {
+            return true;
+          }
+        }
+
         function isSameOriginAppAuthPath(urlString) {
           try {
             var parsed = new URL(urlString, appOrigin);
@@ -263,23 +289,21 @@ export function renderSessionTokenBouncePage(request: Request): never {
           }
         }
 
-        function requiresUserAction(urlString) {
-          if (isOAuthInstallUrl(urlString)) return true;
-          try {
-            return new URL(urlString, appOrigin).origin !== appOrigin;
-          } catch (error) {
-            return true;
+        function navigateSameOrigin(url, reason) {
+          if (isCrossOriginNavigationTarget(url)) {
+            console.log("session_token_cross_origin_navigation_blocked", {
+              url: url,
+              reason: reason,
+            });
+            showReconnectPrompt(url, reason);
+            return;
           }
-        }
 
-        function navigateTop(url, reason) {
-          console.log("session_token_oauth_redirect_detected", {
+          console.log("session_token_same_origin_redirect", {
             url: url,
             reason: reason,
           });
-          console.log("session_token_top_navigation_start", url);
-          var target = window.top && window.top !== window ? window.top : window;
-          target.location.href = url;
+          window.location.assign(url);
         }
 
         function showReconnectPrompt(url, reason) {
@@ -289,6 +313,10 @@ export function renderSessionTokenBouncePage(request: Request): never {
             reason: reason,
           });
           console.log("session_token_user_action_required", {
+            url: url,
+            reason: reason,
+          });
+          console.log("session_token_cross_origin_navigation_blocked", {
             url: url,
             reason: reason,
           });
@@ -311,11 +339,17 @@ export function renderSessionTokenBouncePage(request: Request): never {
         }
 
         function handleNavigationTarget(url, reason) {
-          if (requiresUserAction(url)) {
+          if (isCrossOriginNavigationTarget(url)) {
             showReconnectPrompt(url, reason);
             return;
           }
-          navigateTop(url, reason);
+
+          if (isSameOriginAppAuthPath(url)) {
+            navigateSameOrigin(url, reason);
+            return;
+          }
+
+          navigateSameOrigin(url, reason);
         }
 
         function resolveNavigationTarget(response, reloadUrl) {
@@ -324,7 +358,7 @@ export function renderSessionTokenBouncePage(request: Request): never {
             return { url: reauthUrl, reason: "reauth_header" };
           }
 
-          if (response.url && isOAuthInstallUrl(response.url)) {
+          if (response.url && isCrossOriginNavigationTarget(response.url)) {
             return { url: response.url, reason: "response_url" };
           }
 
@@ -332,24 +366,17 @@ export function renderSessionTokenBouncePage(request: Request): never {
             var locationHeader = response.headers.get("Location");
             if (locationHeader) {
               var redirectUrl = new URL(locationHeader, reloadUrl.href).href;
-              if (
-                isOAuthInstallUrl(redirectUrl) ||
-                isSameOriginAppAuthPath(redirectUrl)
-              ) {
+              if (isCrossOriginNavigationTarget(redirectUrl)) {
                 return {
                   url: redirectUrl,
-                  reason: "redirect_" + response.status,
+                  reason: "cross_origin_redirect_" + response.status,
                 };
               }
-              try {
-                if (new URL(redirectUrl).origin !== appOrigin) {
-                  return {
-                    url: redirectUrl,
-                    reason: "cross_origin_redirect_" + response.status,
-                  };
-                }
-              } catch (error) {
-                return { url: redirectUrl, reason: "redirect_parse_fallback" };
+              if (isSameOriginAppAuthPath(redirectUrl)) {
+                return {
+                  url: redirectUrl,
+                  reason: "same_origin_auth_redirect_" + response.status,
+                };
               }
             }
           }
@@ -359,7 +386,7 @@ export function renderSessionTokenBouncePage(request: Request): never {
           }
 
           if (response.type === "opaqueredirect") {
-            return { url: reloadUrl.href, reason: "opaque_redirect" };
+            return null;
           }
 
           return null;
