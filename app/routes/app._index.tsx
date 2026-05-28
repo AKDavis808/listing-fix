@@ -67,6 +67,7 @@ import {
 import {
   endTimer,
   logListingFixEvent,
+  sanitizeErrorMessage,
   startTimer,
 } from "../features/listingFix/telemetry";
 import {
@@ -178,41 +179,109 @@ export type ListingFixAuditActionData =
 
 export type { DashboardCatalogFilter } from "../features/listingFix/dashboardHelpers";
 
+const EMPTY_USAGE: ListingFixDailyUsageSnapshot = {
+  scansRemaining: 0,
+  aiRemaining: 0,
+  scansUsed: 0,
+  aiUsed: 0,
+  applyUsed: 0,
+  scanLimit: 0,
+  aiLimit: 0,
+  usageDate: new Date().toISOString().slice(0, 10),
+};
+
 export const loader = async ({
   request,
 }: LoaderFunctionArgs): Promise<ListingFixHomeLoaderData> => {
-  const { admin, session } = await authenticate.admin(request);
-  const shop = session.shop;
-  const usage = await getRemainingUsage(shop);
-  const scanHistory = await listRecentScanSessions(shop);
-  const timer = startTimer("load-catalog");
+  logListingFixEvent({
+    action: "dashboard_loader",
+    meta: { event: "app_index_loader_start" },
+  });
 
-  const result = await fetchCatalogProducts(admin, 25);
-  if (!result.ok) {
+  try {
+    const { admin, session } = await authenticate.admin(request);
+    const shop = session.shop;
+    const usage = await getRemainingUsage(shop);
+    const scanHistory = await listRecentScanSessions(shop);
+    const timer = startTimer("load-catalog");
+
+    const result = await fetchCatalogProducts(admin, 25);
+    if (!result.ok) {
+      logListingFixEvent({
+        action: "catalog_load_failure",
+        shop,
+        durationMs: endTimer(timer),
+        message: result.errorMessage,
+        meta: { event: "app_index_loader_success", loaderOk: false },
+      });
+      return {
+        ok: false,
+        errorMessage: result.errorMessage,
+        products: [],
+        shop,
+        usage,
+        scanHistory,
+      };
+    }
+
     logListingFixEvent({
-      action: "catalog_load_failure",
+      action: "dashboard_loader",
       shop,
       durationMs: endTimer(timer),
-      message: result.errorMessage,
+      meta: {
+        event: "app_index_loader_success",
+        loaderOk: true,
+        productCount: result.products.length,
+      },
     });
+
     return {
-      ok: false,
-      errorMessage: result.errorMessage,
-      products: [],
+      ok: true,
+      errorMessage: null,
+      products: result.products.map(toClientCatalogRow),
       shop,
       usage,
       scanHistory,
     };
-  }
+  } catch (error) {
+    if (error instanceof Response) {
+      throw error;
+    }
 
-  return {
-    ok: true,
-    errorMessage: null,
-    products: result.products.map(toClientCatalogRow),
-    shop,
-    usage,
-    scanHistory,
-  };
+    const shop =
+      new URL(request.url).searchParams.get("shop") ??
+      undefined;
+
+    logListingFixEvent({
+      action: "dashboard_loader",
+      shop,
+      message: error,
+      meta: {
+        event: "app_index_loader_error",
+        detail: sanitizeErrorMessage(error),
+      },
+    });
+
+    let usage = EMPTY_USAGE;
+    let scanHistory: CatalogScanSessionSummary[] = [];
+    if (shop) {
+      try {
+        usage = await getRemainingUsage(shop);
+        scanHistory = await listRecentScanSessions(shop);
+      } catch {
+        // Keep empty fallbacks so the route can still render a friendly error.
+      }
+    }
+
+    return {
+      ok: false,
+      errorMessage: sanitizeErrorMessage(error) || "Couldn't load ListingFix dashboard data.",
+      products: [],
+      shop: shop ?? "",
+      usage,
+      scanHistory,
+    };
+  }
 };
 
 export const action = async ({
@@ -321,6 +390,24 @@ export default function ListingFixHomePage() {
   const bridgeReady = appBridge != null;
   const revalidator = useRevalidator();
   const navigation = useNavigation();
+
+  useEffect(() => {
+    logListingFixEvent({
+      action: "dashboard_render",
+      shop: data.shop,
+      meta: {
+        event: "app_index_component_rendered",
+        loaderOk: data.ok,
+        bridgeReady,
+        source: "client",
+      },
+    });
+    console.log("app_index_component_rendered", {
+      loaderOk: data.ok,
+      bridgeReady,
+      shop: data.shop,
+    });
+  }, [bridgeReady, data.ok, data.shop]);
 
   const [trackedApplyField, setTrackedApplyField] =
     useState<ApplyListingFieldKind | null>(null);
@@ -1208,48 +1295,9 @@ export default function ListingFixHomePage() {
       productCount={productCount}
       auditCount={auditCount}
       bridgeReady={bridgeReady}
-      renderPhase={bridgeReady ? "dashboard" : "waiting_for_app_bridge"}
+      renderPhase="dashboard"
     />
   );
-
-  if (!bridgeReady) {
-    return (
-      <ListingFixDashboardErrorBoundary
-        shop={shopDomain}
-        loaderOk={data.ok}
-        productCount={productCount}
-        auditCount={auditCount}
-        bridgeReady={bridgeReady}
-      >
-        <Page
-          fullWidth
-          compactTitle
-          title="ListingFix"
-          titleMetadata={<ListingFixBetaBadge />}
-          subtitle="Loading your catalog dashboard…"
-        >
-          <Layout>
-            <Layout.Section>
-              <BlockStack gap="500">
-                <Card roundedAbove="sm" padding="500">
-                  <BlockStack gap="300">
-                    <InlineStack gap="200" blockAlign="center">
-                      <Spinner accessibilityLabel="Loading dashboard" size="small" />
-                      <Text as="p" variant="bodyMd" tone="subdued">
-                        Connecting to Shopify Admin…
-                      </Text>
-                    </InlineStack>
-                    <SkeletonBodyText lines={10} />
-                  </BlockStack>
-                </Card>
-                {dashboardDebugPanel}
-              </BlockStack>
-            </Layout.Section>
-          </Layout>
-        </Page>
-      </ListingFixDashboardErrorBoundary>
-    );
-  }
 
   return (
     <ListingFixDashboardErrorBoundary
@@ -1286,6 +1334,21 @@ export default function ListingFixHomePage() {
       <Layout>
         <Layout.Section>
           <BlockStack gap="500">
+            <Box padding="200">
+              <Text as="p" variant="bodySm" tone="subdued">
+                [debug] app index component rendered
+              </Text>
+            </Box>
+
+            {!bridgeReady ? (
+              <Banner tone="info" title="Connecting to Shopify Admin">
+                <Text as="p" variant="bodyMd">
+                  ListingFix is finishing its embedded connection. The dashboard is
+                  available below while App Bridge initializes.
+                </Text>
+              </Banner>
+            ) : null}
+
             <Box className="listing-fix-page-intro">
               <ListingFixActionReassurance message={REASSURANCE.scan} />
             </Box>
