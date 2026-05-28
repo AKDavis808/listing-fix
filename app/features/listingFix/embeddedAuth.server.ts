@@ -117,11 +117,129 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+const DEFAULT_APP_RELOAD_PATH = "/app";
+const SESSION_TOKEN_RELOAD_PRESERVED_PARAMS = [
+  "embedded",
+  "shop",
+  "host",
+  "locale",
+  "session",
+  "timestamp",
+] as const;
+
+function isSessionTokenReloadPath(pathname: string): boolean {
+  return (
+    pathname === SESSION_TOKEN_PATH ||
+    pathname.endsWith(`${SESSION_TOKEN_PATH}/`)
+  );
+}
+
+function buildDefaultSessionTokenReloadSearchParams(
+  requestUrl: URL,
+): URLSearchParams | null {
+  const shop = requestUrl.searchParams.get("shop");
+  const host = requestUrl.searchParams.get("host");
+  if (!shop || !host) return null;
+
+  const params = new URLSearchParams();
+  params.set("embedded", requestUrl.searchParams.get("embedded") ?? "1");
+  params.set("shop", shop);
+  params.set("host", host);
+
+  for (const key of SESSION_TOKEN_RELOAD_PRESERVED_PARAMS) {
+    if (key === "embedded" || key === "shop" || key === "host") continue;
+    const value = requestUrl.searchParams.get(key);
+    if (value) params.set(key, value);
+  }
+
+  return params;
+}
+
+function sanitizeSessionTokenReloadTarget(
+  rawReload: string,
+  requestUrl: URL,
+): { reloadUrl: string; preventedSelfReload: boolean } {
+  const appUrl = normalizeShopifyAppUrl(process.env.SHOPIFY_APP_URL);
+  const base = appUrl || requestUrl.origin;
+  let parsed: URL;
+
+  try {
+    parsed = new URL(rawReload, base);
+  } catch {
+    const fallbackParams = buildDefaultSessionTokenReloadSearchParams(requestUrl);
+    const query = fallbackParams?.toString();
+    return {
+      reloadUrl: query
+        ? `${DEFAULT_APP_RELOAD_PATH}?${query}`
+        : DEFAULT_APP_RELOAD_PATH,
+      preventedSelfReload: false,
+    };
+  }
+
+  let preventedSelfReload = false;
+  if (isSessionTokenReloadPath(parsed.pathname)) {
+    parsed.pathname = DEFAULT_APP_RELOAD_PATH;
+    preventedSelfReload = true;
+  }
+
+  parsed.searchParams.delete("shopify-reload");
+  parsed.searchParams.delete("id_token");
+  parsed.searchParams.delete("hmac");
+
+  const sameOriginBase = new URL(base);
+  if (parsed.origin === sameOriginBase.origin) {
+    const query = parsed.searchParams.toString();
+    return {
+      reloadUrl: `${parsed.pathname}${query ? `?${query}` : ""}${parsed.hash}`,
+      preventedSelfReload,
+    };
+  }
+
+  return { reloadUrl: parsed.href, preventedSelfReload };
+}
+
+function resolveSessionTokenReloadTarget(request: Request): {
+  reloadUrl: string | null;
+  defaulted: boolean;
+  preventedSelfReload: boolean;
+} {
+  const requestUrl = new URL(request.url);
+  const rawReload = requestUrl.searchParams.get("shopify-reload");
+
+  if (rawReload) {
+    const sanitized = sanitizeSessionTokenReloadTarget(rawReload, requestUrl);
+    return {
+      reloadUrl: sanitized.reloadUrl,
+      defaulted: false,
+      preventedSelfReload: sanitized.preventedSelfReload,
+    };
+  }
+
+  const defaultParams = buildDefaultSessionTokenReloadSearchParams(requestUrl);
+  if (!defaultParams) {
+    return {
+      reloadUrl: null,
+      defaulted: false,
+      preventedSelfReload: false,
+    };
+  }
+
+  const defaultReload = `${DEFAULT_APP_RELOAD_PATH}?${defaultParams.toString()}`;
+  const sanitized = sanitizeSessionTokenReloadTarget(defaultReload, requestUrl);
+
+  return {
+    reloadUrl: sanitized.reloadUrl,
+    defaulted: true,
+    preventedSelfReload: sanitized.preventedSelfReload,
+  };
+}
+
 export function renderSessionTokenBouncePage(request: Request): never {
   const url = new URL(request.url);
   const shop = url.searchParams.get("shop");
-  const shopifyReload = url.searchParams.get("shopify-reload");
   const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
+  const reloadResolution = resolveSessionTokenReloadTarget(request);
+  const { reloadUrl, defaulted, preventedSelfReload } = reloadResolution;
 
   if (!apiKey) {
     logEmbeddedAuthEvent("session_missing", request, {
@@ -130,7 +248,31 @@ export function renderSessionTokenBouncePage(request: Request): never {
     });
   }
 
-  if (!shopifyReload) {
+  if (defaulted && reloadUrl) {
+    logListingFixEvent({
+      action: "auth_redirect",
+      shop,
+      meta: {
+        event: "session_token_missing_reload_defaulted",
+        reloadUrl,
+        route: "auth.session-token",
+      },
+    });
+  }
+
+  if (preventedSelfReload && reloadUrl) {
+    logListingFixEvent({
+      action: "auth_redirect",
+      shop,
+      meta: {
+        event: "session_token_self_reload_prevented",
+        reloadUrl,
+        route: "auth.session-token",
+      },
+    });
+  }
+
+  if (!reloadUrl) {
     logEmbeddedAuthEvent("session_missing", request, {
       reason: "missing_shopify_reload",
       route: "auth.session-token",
@@ -142,7 +284,10 @@ export function renderSessionTokenBouncePage(request: Request): never {
     source: "render_session_token_bounce",
     preservedShop: Boolean(shop),
     preservedHost: Boolean(url.searchParams.get("host")),
-    hasShopifyReload: Boolean(shopifyReload),
+    hasShopifyReload: Boolean(url.searchParams.get("shopify-reload")),
+    hasResolvedReload: Boolean(reloadUrl),
+    reloadDefaulted: defaulted,
+    reloadSelfLoopPrevented: preventedSelfReload,
   });
 
   const responseHeaders = new Headers({
@@ -233,12 +378,86 @@ export function renderSessionTokenBouncePage(request: Request): never {
       (function () {
         var REAUTH_HEADER = "X-Shopify-API-Request-Failure-Reauthorize-Url";
         var pageParams = new URLSearchParams(location.search);
-        var shopifyReload = pageParams.get("shopify-reload");
         var appOrigin = location.origin;
         var pendingReconnectUrl = null;
+        var reloadDefaulted = ${JSON.stringify(defaulted)};
+        var reloadSelfLoopPrevented = ${JSON.stringify(preventedSelfReload)};
+        var shopifyReload = ${JSON.stringify(reloadUrl ?? "")};
 
         function logError(reason) {
           console.log("session_token_error", reason);
+        }
+
+        function buildDefaultReloadFromPageParams() {
+          var shop = pageParams.get("shop");
+          var host = pageParams.get("host");
+          if (!shop || !host) return "";
+
+          var params = new URLSearchParams();
+          params.set("embedded", pageParams.get("embedded") || "1");
+          params.set("shop", shop);
+          params.set("host", host);
+          ["locale", "session", "timestamp"].forEach(function (key) {
+            var value = pageParams.get(key);
+            if (value) params.set(key, value);
+          });
+
+          return "/app?" + params.toString();
+        }
+
+        function sanitizeReloadTarget(rawReload) {
+          if (!rawReload) return "";
+
+          try {
+            var parsed = new URL(rawReload, appOrigin);
+            if (/\\/auth\\/session-token\\/?$/.test(parsed.pathname)) {
+              console.log("session_token_self_reload_prevented", {
+                original: rawReload,
+                reloadUrl: "/app" + (parsed.search || ""),
+              });
+              parsed.pathname = "/app";
+            }
+
+            parsed.searchParams.delete("shopify-reload");
+            parsed.searchParams.delete("id_token");
+            parsed.searchParams.delete("hmac");
+
+            if (parsed.origin === appOrigin) {
+              return (
+                parsed.pathname +
+                (parsed.search ? parsed.search : "") +
+                (parsed.hash || "")
+              );
+            }
+
+            return parsed.href;
+          } catch (error) {
+            return rawReload;
+          }
+        }
+
+        if (!shopifyReload) {
+          shopifyReload = buildDefaultReloadFromPageParams();
+          if (shopifyReload) {
+            reloadDefaulted = true;
+            console.log("session_token_missing_reload_defaulted", {
+              shopifyReload: shopifyReload,
+            });
+          }
+        }
+
+        shopifyReload = sanitizeReloadTarget(shopifyReload);
+
+        if (reloadDefaulted && shopifyReload) {
+          console.log("session_token_missing_reload_defaulted", {
+            shopifyReload: shopifyReload,
+          });
+        }
+
+        if (reloadSelfLoopPrevented && shopifyReload) {
+          console.log("session_token_self_reload_prevented", {
+            shopifyReload: shopifyReload,
+          });
         }
 
         function isOAuthInstallUrl(urlString) {
@@ -536,7 +755,7 @@ export function renderSessionTokenBouncePage(request: Request): never {
           }, 50);
         }
 
-        if (shopifyReload) {
+        if (pageParams.get("shopify-reload")) {
           pageParams.delete("shopify-reload");
           var cleanedSearch = pageParams.toString();
           history.replaceState(
