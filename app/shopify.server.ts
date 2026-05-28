@@ -102,11 +102,32 @@ export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 export const authenticate = {
   ...shopify.authenticate,
   admin: async (request: Request) => {
-    await bootstrapOfflineSessionIfNeeded(
+    const bootstrapResult = await bootstrapOfflineSessionIfNeeded(
       request,
       listingFixApi,
       sessionStorage,
     );
+
+    logAuthDiagnosticOnce(
+      `bootstrap_complete:${bootstrapResult.offlineSessionId ?? "unknown"}:${bootstrapResult.status}`,
+      () => {
+        logListingFixEvent({
+          action:
+            bootstrapResult.status === "success"
+              ? "session_restored"
+              : "oauth_start",
+          shop: new URL(request.url).searchParams.get("shop"),
+          meta: {
+            event: "bootstrap_complete_before_authenticate_admin",
+            bootstrap_status: bootstrapResult.status,
+            bootstrap_decision: bootstrapResult.decision,
+            bootstrap_verify_session_saved: bootstrapResult.sessionVerified,
+            offlineSessionId: bootstrapResult.offlineSessionId,
+          },
+        });
+      },
+    );
+
     return authenticateEmbeddedAdmin(
       request,
       shopify.authenticate.admin.bind(shopify.authenticate),

@@ -87,12 +87,21 @@ export function isBounceRequest(request: Request): boolean {
   const url = new URL(request.url);
   const searchParams = url.searchParams;
 
-  return (
-    searchParams.has("session") ||
-    url.pathname.includes("/auth/session-token") ||
-    request.headers.get(RETRY_INVALID_SESSION_HEADER) === "1" ||
-    request.headers.has(BOUNCE_REQUEST_HEADER)
-  );
+  if (url.pathname.includes("/auth/session-token")) {
+    return true;
+  }
+
+  if (request.headers.get(RETRY_INVALID_SESSION_HEADER) === "1") {
+    return true;
+  }
+
+  if (request.headers.has(BOUNCE_REQUEST_HEADER)) {
+    return true;
+  }
+
+  // Shopify embed URLs include `session` on initial iframe loads too.
+  // Treat it as bounce only when the App Bridge bounce header is present.
+  return searchParams.has("session") && request.headers.has(BOUNCE_REQUEST_HEADER);
 }
 
 export function resolveBootstrapRequestContext(

@@ -1,7 +1,9 @@
+import type { Session } from "@shopify/shopify-api";
 import { RequestedTokenType, type Shopify } from "@shopify/shopify-api";
 import type { SessionStorage } from "@shopify/shopify-app-session-storage";
 
 import db from "../../db.server";
+import { verifyBootstrapSessionSaved } from "./bootstrapSessionVerify.server";
 import { logAuthDiagnosticOnce } from "./authDiagnostics.server";
 import {
   getOfflineSessionId,
@@ -15,9 +17,24 @@ import {
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
 const OFFLINE_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
-const bootstrapInFlight = new Set<string>();
 const rejectedTokenFingerprints = new Map<string, number>();
 const REJECTED_TOKEN_TTL_MS = 60_000;
+const shopBootstrapWork = new Map<string, Promise<BootstrapResult>>();
+
+export type BootstrapResult = {
+  status: "skipped" | "success" | "failure";
+  decision: BootstrapDecision;
+  sessionVerified: boolean;
+  offlineSessionId: string | null;
+};
+
+type BootstrapPhase =
+  | "bootstrap_started"
+  | "bootstrap_exchange_complete"
+  | "bootstrap_store_complete"
+  | "bootstrap_verify_session_saved"
+  | "bootstrap_finished"
+  | "bootstrap_persist_failure";
 
 function isOfflineRowUsable(
   row: {
@@ -54,6 +71,26 @@ function rememberRejectedToken(shop: string, token: string): void {
   );
 }
 
+function logBootstrapPhase(
+  shop: string,
+  phase: BootstrapPhase,
+  meta?: Record<string, string | number | boolean | null | undefined>,
+): void {
+  logListingFixEvent({
+    action:
+      phase === "bootstrap_persist_failure" || phase === "bootstrap_finished"
+        ? phase === "bootstrap_persist_failure"
+          ? "session_missing"
+          : "session_restored"
+        : "oauth_start",
+    shop,
+    meta: {
+      event: phase,
+      ...meta,
+    },
+  });
+}
+
 function logBootstrapDecision(
   shop: string,
   context: BootstrapRequestContext,
@@ -81,20 +118,24 @@ function logBootstrapDecision(
   });
 }
 
-function shouldPerformTokenExchange(
+function skippedResult(
   decision: BootstrapDecision,
-): decision is "bootstrap_from_url_id_token" {
-  return decision === "bootstrap_from_url_id_token";
+  offlineSessionId: string | null,
+): BootstrapResult {
+  return {
+    status: "skipped",
+    decision,
+    sessionVerified: decision === "skip_existing_session",
+    offlineSessionId,
+  };
 }
 
-export async function bootstrapOfflineSessionIfNeeded(
+async function runBootstrapWork(
   request: Request,
   api: Shopify,
   sessionStorage: SessionStorage,
-): Promise<void> {
-  const shop = new URL(request.url).searchParams.get("shop");
-  if (!shop) return;
-
+  shop: string,
+): Promise<BootstrapResult> {
   const offlineSessionId = getOfflineSessionId(shop);
   const existingRow = await db.session.findUnique({
     where: { id: offlineSessionId },
@@ -106,9 +147,13 @@ export async function bootstrapOfflineSessionIfNeeded(
     hasExistingOfflineSession,
   );
 
-  if (!shouldPerformTokenExchange(context.decision)) {
+  if (context.decision !== "bootstrap_from_url_id_token") {
     logBootstrapDecision(shop, context, { offlineSessionId });
-    return;
+    logBootstrapPhase(shop, "bootstrap_finished", {
+      bootstrap_decision: context.decision,
+      bootstrap_status: "skipped",
+    });
+    return skippedResult(context.decision, offlineSessionId);
   }
 
   const token = context.token;
@@ -117,58 +162,108 @@ export async function bootstrapOfflineSessionIfNeeded(
       offlineSessionId,
       reason: "missing_normalized_url_id_token",
     });
-    return;
+    logBootstrapPhase(shop, "bootstrap_finished", {
+      bootstrap_decision: "skip_missing_id_token",
+      bootstrap_status: "skipped",
+    });
+    return skippedResult("skip_missing_id_token", offlineSessionId);
   }
 
   if (shouldSkipRejectedToken(shop, token)) {
-    return;
+    logBootstrapPhase(shop, "bootstrap_finished", {
+      bootstrap_decision: context.decision,
+      bootstrap_status: "skipped_rejected_token",
+    });
+    return {
+      status: "skipped",
+      decision: context.decision,
+      sessionVerified: false,
+      offlineSessionId,
+    };
   }
-
-  const inFlightKey = `${shop}:${tokenFingerprint(token)}`;
-  if (bootstrapInFlight.has(inFlightKey)) {
-    return;
-  }
-
-  bootstrapInFlight.add(inFlightKey);
 
   logBootstrapDecision(shop, context, {
     offlineSessionId,
     token_exchange_token_source: "url_id_token",
   });
-
-  logAuthDiagnosticOnce(`token_exchange_start:${shop}:url_id_token`, () => {
-    logSessionPersistenceEvent("token_exchange_start", shop, {
-      offlineSessionId,
-      bootstrap_decision: context.decision,
-      token_exchange_token_source: "url_id_token",
-      token_exchange_token_shape_dotCount: context.shape.dotCount,
-      token_exchange_token_shape_hasThreeJwtSections:
-        context.shape.hasThreeJwtSections,
-      token_exchange_token_shape_jwtSectionCount: context.shape.jwtSectionCount,
-      token_exchange_token_shape_length: context.shape.length,
-    });
+  logBootstrapPhase(shop, "bootstrap_started", {
+    bootstrap_decision: context.decision,
+    offlineSessionId,
+    token_exchange_token_source: "url_id_token",
   });
 
   try {
-    const { session } = await api.auth.tokenExchange({
+    const { session: exchangedSession } = await api.auth.tokenExchange({
       sessionToken: token,
       shop,
       requestedTokenType: RequestedTokenType.OfflineAccessToken,
       expiring: true,
     });
 
-    const stored = await sessionStorage.storeSession(session);
+    logBootstrapPhase(shop, "bootstrap_exchange_complete", {
+      sessionId: exchangedSession.id,
+      offlineSessionId,
+    });
 
     logSessionPersistenceEvent("token_exchange_success", shop, {
-      sessionId: session.id,
-      stored,
+      sessionId: exchangedSession.id,
       bootstrap_decision: context.decision,
       token_exchange_token_source: "url_id_token",
-      token_exchange_token_shape_dotCount: context.shape.dotCount,
-      token_exchange_token_shape_hasThreeJwtSections:
-        context.shape.hasThreeJwtSections,
-      token_exchange_token_shape_length: context.shape.length,
     });
+
+    const stored = await sessionStorage.storeSession(exchangedSession);
+
+    logBootstrapPhase(shop, "bootstrap_store_complete", {
+      sessionId: exchangedSession.id,
+      stored,
+      offlineSessionId,
+    });
+
+    const sessionVerified = await verifyBootstrapSessionSaved(
+      sessionStorage,
+      shop,
+      exchangedSession,
+    );
+
+    logBootstrapPhase(shop, "bootstrap_verify_session_saved", {
+      bootstrap_verify_session_saved: sessionVerified,
+      sessionId: exchangedSession.id,
+      offlineSessionId,
+    });
+
+    if (!sessionVerified) {
+      logBootstrapPhase(shop, "bootstrap_persist_failure", {
+        sessionId: exchangedSession.id,
+        offlineSessionId,
+        stored,
+      });
+      logBootstrapPhase(shop, "bootstrap_finished", {
+        bootstrap_status: "failure",
+        bootstrap_decision: context.decision,
+        bootstrap_verify_session_saved: false,
+      });
+      return {
+        status: "failure",
+        decision: context.decision,
+        sessionVerified: false,
+        offlineSessionId,
+      };
+    }
+
+    logBootstrapPhase(shop, "bootstrap_finished", {
+      bootstrap_status: "success",
+      bootstrap_decision: context.decision,
+      bootstrap_verify_session_saved: true,
+      sessionId: exchangedSession.id,
+      offlineSessionId,
+    });
+
+    return {
+      status: "success",
+      decision: context.decision,
+      sessionVerified: true,
+      offlineSessionId,
+    };
   } catch (error) {
     rememberRejectedToken(shop, token);
 
@@ -177,15 +272,53 @@ export async function bootstrapOfflineSessionIfNeeded(
         offlineSessionId,
         bootstrap_decision: context.decision,
         token_exchange_token_source: "url_id_token",
-        token_exchange_token_shape_dotCount: context.shape.dotCount,
-        token_exchange_token_shape_hasThreeJwtSections:
-          context.shape.hasThreeJwtSections,
-        token_exchange_token_shape_jwtSectionCount: context.shape.jwtSectionCount,
-        token_exchange_token_shape_length: context.shape.length,
         message: sanitizeErrorMessage(error),
       });
     });
+
+    logBootstrapPhase(shop, "bootstrap_finished", {
+      bootstrap_status: "failure",
+      bootstrap_decision: context.decision,
+      message: sanitizeErrorMessage(error),
+    });
+
+    return {
+      status: "failure",
+      decision: context.decision,
+      sessionVerified: false,
+      offlineSessionId,
+    };
+  }
+}
+
+export async function bootstrapOfflineSessionIfNeeded(
+  request: Request,
+  api: Shopify,
+  sessionStorage: SessionStorage,
+): Promise<BootstrapResult> {
+  const shop = new URL(request.url).searchParams.get("shop");
+  if (!shop) {
+    return {
+      status: "skipped",
+      decision: "skip_missing_id_token",
+      sessionVerified: false,
+      offlineSessionId: null,
+    };
+  }
+
+  const existingWork = shopBootstrapWork.get(shop);
+  if (existingWork) {
+    return existingWork;
+  }
+
+  const work = runBootstrapWork(request, api, sessionStorage, shop);
+  shopBootstrapWork.set(shop, work);
+
+  try {
+    return await work;
   } finally {
-    bootstrapInFlight.delete(inFlightKey);
+    if (shopBootstrapWork.get(shop) === work) {
+      shopBootstrapWork.delete(shop);
+    }
   }
 }
