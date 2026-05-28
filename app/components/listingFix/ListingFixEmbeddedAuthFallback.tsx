@@ -15,8 +15,6 @@ export function ListingFixEmbeddedAuthFallback({
     if (typeof window === "undefined") return;
 
     if (oauthInstallUrl) {
-      console.log("session_token_reconnect_clicked", oauthInstallUrl);
-      console.log("session_token_top_navigation_start", oauthInstallUrl);
       const target = window.top && window.top !== window ? window.top : window;
       if (oauthInstallUrl.startsWith("/")) {
         target.location.assign(oauthInstallUrl);

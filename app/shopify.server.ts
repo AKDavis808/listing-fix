@@ -9,6 +9,7 @@ import type { Session } from "@shopify/shopify-api";
 import prisma from "./db.server";
 import { runAfterAuthPipeline } from "./features/listingFix/afterAuthPipeline.server";
 import { logAuthDiagnosticOnce } from "./features/listingFix/authDiagnostics.server";
+import { isAuthDebugEnabled } from "./features/listingFix/authDebugEnv.server";
 import {
   authenticateEmbeddedAdmin,
   loginWithEmbeddedContext,
@@ -40,18 +41,15 @@ const distribution = AppDistribution.AppStore;
 const sessionStorage = new InstrumentedPrismaSessionStorage(prisma);
 
 logAuthDiagnosticOnce("shopify_auth_config", () => {
-  console.info("[ListingFix][session_restored] Shopify auth config", {
+  if (!isAuthDebugEnabled()) return;
+
+  console.info("[ListingFix][auth_debug] Shopify auth config", {
     appUrl,
     distribution,
-    useOnlineTokens,
-    expiringOfflineAccessTokens,
-    authPathPrefix: AUTH_PATH_PREFIX,
     authCallbackPath: AUTH_CALLBACK_PATH,
-    sessionStorage: "InstrumentedPrismaSessionStorage",
     hasApiKey: Boolean(apiKey),
     hasApiSecret: Boolean(apiSecretKey),
     scopesConfigured: Boolean(scopes?.length),
-    nodeEnv: process.env.NODE_ENV ?? "development",
   });
 });
 

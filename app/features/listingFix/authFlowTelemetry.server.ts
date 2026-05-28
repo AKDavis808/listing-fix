@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { isAuthDebugEnabled } from "./authDebugEnv.server";
 import { logListingFixEvent } from "./telemetry";
 
 const AUTH_FLOW_COOKIE = "listingfix_auth_flow_id";
@@ -114,44 +115,13 @@ function inferLikelyRootCause(state: AuthFlowState): string {
   const last = events.at(-1) ?? "unknown";
 
   if (events.includes("oauth_callback_validation_failure")) {
-    const preValidationStep = state.steps.find(
-      (step) => step.event === "oauth_callback_pre_validation",
-    );
-    if (preValidationStep?.meta?.callback_hmac_valid === false) {
-      return "OAuth callback HMAC validation failed — SHOPIFY_API_SECRET on Railway likely does not match Shopify Dev Dashboard Client secret.";
-    }
-    if (preValidationStep?.meta?.callback_state_matches_cookie === false) {
-      return "OAuth callback state query does not match verified state cookie.";
-    }
-    if (preValidationStep?.meta?.duplicate_state_cookie_detected === true) {
-      return "Duplicate shopify_app_state cookies detected on callback.";
-    }
-    if (preValidationStep?.meta?.redirect_uri_matches_expected === false) {
-      return "Configured redirect URI does not match https://listing-fix-production.up.railway.app/auth/callback.";
-    }
-    if (
-      preValidationStep?.meta?.configured_api_key_matches_toml_client_id ===
-      false
-    ) {
-      return "SHOPIFY_API_KEY does not match shopify.app.toml client_id.";
-    }
-    return "OAuth callback validation failed — inspect oauth_callback_pre_validation logs for HMAC, state, and redirect URI.";
+    return "OAuth callback validation failed — inspect oauth_callback_validation_failure logs.";
   }
   if (events.includes("prisma_storeSession_failure")) {
     return "Prisma session write failed after OAuth — check DATABASE_URL and Session schema.";
   }
-  if (
-    events.includes("oauth_top_level_set_cookie_count") &&
-    state.steps.some(
-      (step) =>
-        step.event === "oauth_callback_entered" &&
-        step.meta?.cookieHeaderPresent === false,
-    )
-  ) {
-    return "OAuth cookies were set but not returned on callback — likely iframe/top-level cookie scope issue.";
-  }
-  if (events.includes("redirect_to_oauth") && !events.includes("oauth_top_level_auth_begin")) {
-    return "Redirected to OAuth but top-level auth.begin never ran — check /auth/top-level escape flow.";
+  if (events.includes("redirect_to_oauth") && !events.includes("auth_begin_start")) {
+    return "Redirected to OAuth but auth.begin never ran — check /auth/top-level escape flow.";
   }
   if (last === "app_enter" && state.outcome !== "success") {
     return "App loader did not complete with session — offline token missing or authenticate.admin failed.";
@@ -162,26 +132,17 @@ function inferLikelyRootCause(state: AuthFlowState): string {
 
 function inferNextAction(state: AuthFlowState): string {
   const cause = inferLikelyRootCause(state);
-  if (cause.includes("HMAC validation failed")) {
-    return "Copy Client secret from Shopify Dev Dashboard into Railway SHOPIFY_API_SECRET exactly, redeploy, then retry OAuth.";
-  }
-  if (cause.includes("Duplicate shopify_app_state")) {
-    return "Clear cookies for listing-fix-production.up.railway.app and retry OAuth once.";
-  }
-  if (cause.includes("redirect URI")) {
-    return "Set SHOPIFY_APP_URL=https://listing-fix-production.up.railway.app and confirm Partner redirect URLs.";
-  }
-  if (cause.includes("SHOPIFY_API_KEY")) {
-    return "Set Railway SHOPIFY_API_KEY to shopify.app.toml client_id and redeploy.";
-  }
-  if (cause.includes("cookie")) {
-    return "Run npm run auth:e2e and confirm /auth?embedded=0 returns Set-Cookie before callback.";
-  }
   if (cause.includes("Prisma")) {
     return "Run npm run auth:doctor and fix DATABASE_URL / migrate deploy.";
   }
+  if (cause.includes("OAuth callback validation failed")) {
+    return "Check Railway SHOPIFY_API_SECRET and SHOPIFY_API_KEY, then retry OAuth.";
+  }
   if (cause.includes("top-level")) {
     return "Open /auth/top-level in embedded context and verify _top navigation to /auth?embedded=0.";
+  }
+  if (!isAuthDebugEnabled()) {
+    return "Enable auth debug tooling with DEBUG=true or LISTINGFIX_AUTH_DEBUG=1 for deeper diagnostics.";
   }
   return "Run npm run auth:doctor, then npm run auth:e2e, and review .auth-debug/last-flow.json.";
 }
@@ -218,7 +179,7 @@ export function recordAuthFlowStep(
   event: string,
   meta?: Record<string, string | number | boolean | null | undefined>,
 ): string | null {
-  if (!request) return null;
+  if (!isAuthDebugEnabled() || !request) return null;
 
   const flowId = getOrCreateAuthFlowId(request);
   const shop =

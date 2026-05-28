@@ -14,6 +14,7 @@ import {
   getOrCreateAuthFlowId,
   recordAuthFlowStep,
 } from "./authFlowTelemetry.server";
+import { isAuthDebugEnabled } from "./authDebugEnv.server";
 import { logRedirectToOAuth } from "./oauthSessionDiagnostics.server";
 import { getOfflineSessionId } from "./sessionPersistence.server";
 
@@ -91,20 +92,23 @@ export async function ensureOfflineSessionOrRedirectToOAuth(
   }
 
   const offlineSessionId = getOfflineSessionId(shop);
-  const flowId = getOrCreateAuthFlowId(request);
-  const target = appendAuthFlowIdToUrl(buildOAuthAuthUrl(request), flowId);
-
-  logRedirectToOAuth(request, shop, offlineSessionId, reason, target);
-  recordAuthFlowStep(request, "redirect_to_oauth", {
-    reason,
-    target,
-    flowId,
-    pathname: url.pathname,
-  });
-
+  let target = buildOAuthAuthUrl(request);
   const headers = new Headers();
   headers.append("set-cookie", buildOAuthInProgressCookie());
-  headers.append("set-cookie", buildAuthFlowCookie(flowId));
+
+  if (isAuthDebugEnabled()) {
+    const flowId = getOrCreateAuthFlowId(request);
+    target = appendAuthFlowIdToUrl(target, flowId);
+    headers.append("set-cookie", buildAuthFlowCookie(flowId));
+    recordAuthFlowStep(request, "redirect_to_oauth", {
+      reason,
+      target,
+      flowId,
+      pathname: url.pathname,
+    });
+  }
+
+  logRedirectToOAuth(request, shop, offlineSessionId, reason, target);
 
   throw redirect(target, { headers });
 }

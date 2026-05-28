@@ -7,8 +7,10 @@ import {
   readLastFlowSnapshot,
   writeAuthDebugReport,
 } from "./lib/auth-debug-report.mjs";
+import { requireAuthDebugEnabled } from "./lib/auth-debug-env.mjs";
 
 loadDotEnv();
+requireAuthDebugEnabled("auth:doctor");
 
 const shopArgIndex = process.argv.indexOf("--shop");
 const shop =
@@ -152,20 +154,8 @@ console.log(`\n[auth:doctor] Wrote ${outputPath}`);
 
 function inferRootCauseFromFlow(flow) {
   const events = flow.steps?.map((step) => step.event) ?? [];
-  const preValidation = flow.steps?.find(
-    (step) => step.event === "oauth_callback_pre_validation",
-  );
   if (events.includes("oauth_callback_validation_failure")) {
-    if (preValidation?.meta?.callback_hmac_valid === false) {
-      return "OAuth callback HMAC validation failed — SHOPIFY_API_SECRET likely mismatches Shopify Dev Dashboard Client secret.";
-    }
-    if (preValidation?.meta?.callback_state_matches_cookie === false) {
-      return "OAuth callback state query does not match verified state cookie.";
-    }
-    if (preValidation?.meta?.duplicate_state_cookie_detected === true) {
-      return "Duplicate shopify_app_state cookies detected on callback.";
-    }
-    return "OAuth callback validation failed — inspect oauth_callback_pre_validation logs.";
+    return "OAuth callback validation failed — inspect oauth_callback_validation_failure logs.";
   }
   if (events.includes("prisma_storeSession_failure")) {
     return "Session save to Prisma failed after OAuth.";

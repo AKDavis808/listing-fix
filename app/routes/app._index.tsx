@@ -391,24 +391,6 @@ export default function ListingFixHomePage() {
   const revalidator = useRevalidator();
   const navigation = useNavigation();
 
-  useEffect(() => {
-    logListingFixEvent({
-      action: "dashboard_render",
-      shop: data.shop,
-      meta: {
-        event: "app_index_component_rendered",
-        loaderOk: data.ok,
-        bridgeReady,
-        source: "client",
-      },
-    });
-    console.log("app_index_component_rendered", {
-      loaderOk: data.ok,
-      bridgeReady,
-      shop: data.shop,
-    });
-  }, [bridgeReady, data.ok, data.shop]);
-
   const [trackedApplyField, setTrackedApplyField] =
     useState<ApplyListingFieldKind | null>(null);
   const [applyOutcomeBanner, setApplyOutcomeBanner] = useState<
@@ -1334,12 +1316,6 @@ export default function ListingFixHomePage() {
       <Layout>
         <Layout.Section>
           <BlockStack gap="500">
-            <Box padding="200">
-              <Text as="p" variant="bodySm" tone="subdued">
-                [debug] app index component rendered
-              </Text>
-            </Box>
-
             {!bridgeReady ? (
               <Banner tone="info" title="Connecting to Shopify Admin">
                 <Text as="p" variant="bodyMd">

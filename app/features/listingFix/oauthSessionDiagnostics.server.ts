@@ -1,22 +1,14 @@
 import type { Session } from "@shopify/shopify-api";
 
 import db from "../../db.server";
+import { isAuthDebugEnabled } from "./authDebugEnv.server";
 import { isEmbeddedOAuthRequest } from "./embeddedOAuthEscape.server";
 import { getOfflineSessionId } from "./sessionPersistence.server";
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
 
-const REQUIRED_SESSION_FIELDS = [
-  "id",
-  "shop",
-  "state",
-  "isOnline",
-  "scope",
-  "expires",
-  "accessToken",
-  "userId",
-] as const;
-
 export async function logStartupSessionDiagnostics(): Promise<void> {
+  if (!isAuthDebugEnabled()) return;
+
   try {
     const totalCount = await db.session.count();
     const offlineCount = await db.session.count({
@@ -33,7 +25,6 @@ export async function logStartupSessionDiagnostics(): Promise<void> {
         totalCount,
         offlineCount,
         onlineCount,
-        schemaFieldsPresent: REQUIRED_SESSION_FIELDS,
       },
     });
   } catch (error) {
@@ -48,36 +39,19 @@ export async function logStartupSessionDiagnostics(): Promise<void> {
 }
 
 export function logAuthRouteEntered(
-  pathname: string,
-  shop: string | null,
-  meta?: Record<string, string | number | boolean | null | undefined>,
+  _pathname: string,
+  _shop: string | null,
+  _meta?: Record<string, string | number | boolean | null | undefined>,
 ): void {
-  logListingFixEvent({
-    action: "oauth_start",
-    shop,
-    meta: {
-      event: "auth_route_entered",
-      pathname,
-      ...meta,
-    },
-  });
+  // Reserved for auth debug tooling only.
 }
 
 export function logOAuthRouteEntered(
-  pathname: string,
-  shop: string | null,
-  meta?: Record<string, string | number | boolean | null | undefined>,
+  _pathname: string,
+  _shop: string | null,
+  _meta?: Record<string, string | number | boolean | null | undefined>,
 ): void {
-  logListingFixEvent({
-    action: "oauth_start",
-    shop,
-    meta: {
-      event: "oauth_route_entered",
-      pathname,
-      route: "auth",
-      ...meta,
-    },
-  });
+  // Reserved for auth debug tooling only.
 }
 
 export function logRedirectToOAuth(
@@ -99,22 +73,7 @@ export function logRedirectToOAuth(
       fromPathname: url.pathname,
       offlineSessionId,
       embedded: url.searchParams.get("embedded") === "1",
-      hasHost: Boolean(url.searchParams.get("host")),
       isEmbeddedOAuthRequest: isEmbeddedOAuthRequest(request),
-    },
-  });
-}
-
-export function logAuthCallbackEntered(
-  shop: string | null,
-  route = "auth.callback",
-): void {
-  logListingFixEvent({
-    action: "oauth_start",
-    shop,
-    meta: {
-      event: "oauth_callback_entered",
-      route,
     },
   });
 }
@@ -128,51 +87,7 @@ export function logAuthCallbackCompleted(
     shop,
     meta: {
       event: "oauth_callback_completed",
-      route: "auth.$",
       ...meta,
-    },
-  });
-}
-
-export function logAfterAuthStart(session: Session): void {
-  const expectedOfflineSessionId = getOfflineSessionId(session.shop);
-
-  logListingFixEvent({
-    action: "oauth_complete",
-    shop: session.shop,
-    meta: {
-      event: "afterAuth_start",
-      afterAuth_shop: session.shop,
-      afterAuth_session_id: session.id,
-      afterAuth_isOnline: session.isOnline,
-      afterAuth_accessToken_present: Boolean(session.accessToken),
-      afterAuth_expires_present: Boolean(session.expires),
-      afterAuth_scope_present: Boolean(session.scope),
-      expectedOfflineSessionId,
-      offlineIdMatches: session.id === expectedOfflineSessionId,
-      isOfflineSession: session.isOnline === false,
-    },
-  });
-}
-
-export function logAfterAuthFinished(
-  session: Session,
-  prismaVerified: boolean,
-  storeSessionSucceeded?: boolean,
-): void {
-  logListingFixEvent({
-    action: prismaVerified ? "session_restored" : "session_missing",
-    shop: session.shop,
-    meta: {
-      event: "afterAuth_complete",
-      afterAuth_shop: session.shop,
-      afterAuth_session_id: session.id,
-      afterAuth_isOnline: session.isOnline,
-      afterAuth_accessToken_present: Boolean(session.accessToken),
-      prismaVerified,
-      storeSessionSucceeded,
-      expectedOfflineSessionId: getOfflineSessionId(session.shop),
-      offlineIdMatches: session.id === getOfflineSessionId(session.shop),
     },
   });
 }
@@ -188,20 +103,32 @@ export function logAfterAuthPhase(
   session: Session,
   meta?: Record<string, string | number | boolean | null | undefined>,
 ): void {
-  const expectedOfflineSessionId = getOfflineSessionId(session.shop);
+  if (!isAuthDebugEnabled()) return;
 
   logListingFixEvent({
     action: event === "afterAuth_complete" ? "oauth_complete" : "oauth_start",
     shop: session.shop,
     meta: {
       event,
-      afterAuth_shop: session.shop,
-      afterAuth_session_id: session.id,
-      afterAuth_isOnline: session.isOnline,
-      afterAuth_accessToken_present: Boolean(session.accessToken),
-      expectedOfflineSessionId,
-      offlineIdMatches: session.id === expectedOfflineSessionId,
+      sessionId: session.id,
       ...meta,
+    },
+  });
+}
+
+export function logAfterAuthFinished(
+  session: Session,
+  prismaVerified: boolean,
+  storeSessionSucceeded?: boolean,
+): void {
+  logListingFixEvent({
+    action: prismaVerified ? "oauth_complete" : "session_missing",
+    shop: session.shop,
+    meta: {
+      event: "afterAuth_complete",
+      sessionId: session.id,
+      prismaVerified,
+      storeSessionSucceeded,
     },
   });
 }
@@ -218,7 +145,6 @@ export function logAfterAuthWebhookFailure(
     meta: {
       event: "afterAuth_webhook_registration_failed",
       message: sanitizeErrorMessage(error),
-      adminClientAvailable: meta?.adminClientAvailable,
       ...meta,
     },
   });
@@ -247,7 +173,6 @@ export function logAppAuthenticateSuccess(shop: string, sessionId: string): void
       sessionId,
       expectedOfflineSessionId: getOfflineSessionId(shop),
       offlineIdMatches: sessionId === getOfflineSessionId(shop),
-      appRoute: "GET /app",
     },
   });
 }
@@ -269,51 +194,14 @@ export function logOAuthCallbackError(shop: string | null, error: unknown): void
 }
 
 export function logAuthRouteWiringDiagnostic(
-  appUrl: string,
-  distribution: string,
+  _appUrl: string,
+  _distribution: string,
 ): void {
-  logListingFixEvent({
-    action: "session_restored",
-    meta: {
-      event: "auth_route_wiring",
-      authPathPrefix: "/auth",
-      callbackPath: "/auth/callback",
-      routesMounted: [
-        "routes/auth._index (/auth)",
-        "routes/auth.debug (/auth/debug)",
-        "routes/auth.top-level (/auth/top-level)",
-        "routes/auth.callback (/auth/callback)",
-        "routes/auth.$ (auth/* fallback)",
-        "routes/auth.login",
-        "routes/auth.session-token",
-        "routes/auth.exit-iframe",
-      ],
-      distribution,
-      appUrl,
-      note: "Embedded OAuth must escape to /auth/top-level before auth.begin(); top-level /auth?embedded=0 sets OAuth cookies then 302 to Shopify",
-    },
-  });
+  // Reserved for auth debug tooling only.
 }
 
-export function logStoreSessionStart(session: Session): void {
-  const expectedOfflineSessionId = getOfflineSessionId(session.shop);
-
-  logListingFixEvent({
-    action: "oauth_start",
-    shop: session.shop,
-    meta: {
-      event: "storeSession_start",
-      sessionId: session.id,
-      sessionShop: session.shop,
-      isOnline: session.isOnline,
-      accessTokenPresent: Boolean(session.accessToken),
-      expiresPresent: Boolean(session.expires),
-      scopePresent: Boolean(session.scope),
-      expectedOfflineSessionId,
-      offlineIdMatches: session.id === expectedOfflineSessionId,
-      isOfflineSession: session.isOnline === false,
-    },
-  });
+export function logStoreSessionStart(_session: Session): void {
+  // Reserved for auth debug tooling only.
 }
 
 export function logStoreSessionSuccess(
@@ -327,13 +215,9 @@ export function logStoreSessionSuccess(
     meta: {
       event: "prisma_session_saved",
       sessionId: session.id,
-      sessionShop: session.shop,
-      isOnline: session.isOnline,
       stored,
       prismaVerified,
       isOfflineSession: session.isOnline === false,
-      expectedOfflineSessionId: getOfflineSessionId(session.shop),
-      offlineIdMatches: session.id === getOfflineSessionId(session.shop),
     },
   });
 }
@@ -346,8 +230,6 @@ export function logStoreSessionFailure(session: Session, error: unknown): void {
     meta: {
       event: "storeSession_error",
       sessionId: session.id,
-      sessionShop: session.shop,
-      isOnline: session.isOnline,
       message: sanitizeErrorMessage(error),
       errorStack:
         error instanceof Error && error.stack
@@ -358,33 +240,8 @@ export function logStoreSessionFailure(session: Session, error: unknown): void {
 }
 
 export function logLoadSessionResult(
-  sessionId: string,
-  session: Session | undefined,
+  _sessionId: string,
+  _session: Session | undefined,
 ): void {
-  if (session) {
-    logListingFixEvent({
-      action: "session_restored",
-      shop: session.shop,
-      meta: {
-        event: "prisma_session_lookup",
-        sessionId,
-        found: true,
-        sessionShop: session.shop,
-        isOnline: session.isOnline,
-        accessTokenPresent: Boolean(session.accessToken),
-        expectedOfflineSessionId: getOfflineSessionId(session.shop),
-        offlineIdMatches: session.id === getOfflineSessionId(session.shop),
-      },
-    });
-    return;
-  }
-
-  logListingFixEvent({
-    action: "session_missing",
-    meta: {
-      event: "prisma_session_lookup_failed",
-      sessionId,
-      reason: "load_session_miss",
-    },
-  });
+  // Reserved for auth debug tooling only.
 }

@@ -1,10 +1,9 @@
 import { redirect } from "react-router";
 
-import { logListingFixEvent } from "./telemetry";
+import { isAuthDebugEnabled } from "./authDebugEnv.server";
 import { readAuthFlowId, recordAuthFlowStep } from "./authFlowTelemetry.server";
 
 const OAUTH_IN_PROGRESS_COOKIE = "listingfix_oauth_in_progress";
-const EXIT_IFRAME_PATH = "/auth/exit-iframe";
 export const AUTH_TOP_LEVEL_PATH = "/auth/top-level";
 const APP_BRIDGE_SCRIPT_URL =
   "https://cdn.shopify.com/shopifycloud/app-bridge.js";
@@ -60,8 +59,10 @@ export function buildTopLevelOAuthBeginUrl(
 
   params.set("embedded", "0");
 
-  const flowId = readAuthFlowId(request);
-  if (flowId) params.set("authFlowId", flowId);
+  if (isAuthDebugEnabled()) {
+    const flowId = readAuthFlowId(request);
+    if (flowId) params.set("authFlowId", flowId);
+  }
 
   return `${appUrl.replace(/\/$/, "")}/auth?${params.toString()}`;
 }
@@ -77,86 +78,6 @@ export function buildOAuthInProgressCookie(): string {
 
 export function buildClearOAuthInProgressCookie(): string {
   return `${OAUTH_IN_PROGRESS_COOKIE}=; Path=/; Max-Age=0; SameSite=None; Secure; HttpOnly`;
-}
-
-function extractEmbeddedContext(request: Request) {
-  const url = new URL(request.url);
-
-  return {
-    embedded: url.searchParams.get("embedded") === "1",
-    hasHost: Boolean(url.searchParams.get("host")),
-    secFetchDest: request.headers.get("sec-fetch-dest"),
-    isEmbedded: isEmbeddedOAuthRequest(request),
-  };
-}
-
-export function logOAuthEmbeddedDetected(
-  request: Request,
-  shop: string | null,
-): void {
-  const ctx = extractEmbeddedContext(request);
-
-  logListingFixEvent({
-    action: "oauth_start",
-    shop,
-    meta: {
-      event: "oauth_embedded_detected",
-      pathname: new URL(request.url).pathname,
-      embedded: ctx.embedded,
-      hasHost: ctx.hasHost,
-      secFetchDest: ctx.secFetchDest,
-      isEmbeddedOAuthRequest: ctx.isEmbedded,
-    },
-  });
-}
-
-export function logOAuthAuthorizeUrlGenerated(
-  request: Request,
-  shop: string | null,
-  authorizeUrl: string,
-): void {
-  logListingFixEvent({
-    action: "oauth_start",
-    shop,
-    meta: {
-      event: "oauth_authorize_url_generated",
-      oauth_redirect_location: authorizeUrl,
-      authorizeHost: safeUrlHost(authorizeUrl),
-    },
-  });
-}
-
-export function logOAuthEscapeTopLevelStarted(
-  request: Request,
-  shop: string | null,
-  authorizeUrl: string,
-  strategy: "app_bridge_html" | "exit_iframe_redirect",
-): void {
-  logListingFixEvent({
-    action: "auth_redirect",
-    shop,
-    meta: {
-      event: "oauth_escape_top_level_started",
-      oauth_redirect_location: authorizeUrl,
-      oauth_top_level_redirect: true,
-      escaped_iframe_for_oauth: true,
-      strategy,
-      embedded: new URL(request.url).searchParams.get("embedded") === "1",
-      hasHost: Boolean(new URL(request.url).searchParams.get("host")),
-    },
-  });
-}
-
-export function logOAuthInProgressSkip(request: Request, shop: string | null): void {
-  logListingFixEvent({
-    action: "oauth_start",
-    shop,
-    meta: {
-      event: "oauth_in_progress_skip_redirect",
-      pathname: new URL(request.url).pathname,
-      reason: "oauth_already_in_progress",
-    },
-  });
 }
 
 function buildEmbeddedFrameAncestorsCsp(shop: string): string {
@@ -179,24 +100,6 @@ function buildAppBridgeTopLevelEscapeHtml(
 </html>`;
 }
 
-export function logOAuthEscapeBeforeBegin(
-  request: Request,
-  shop: string | null,
-): void {
-  logListingFixEvent({
-    action: "auth_redirect",
-    shop,
-    meta: {
-      event: "oauth_escape_before_begin",
-      pathname: new URL(request.url).pathname,
-      embedded: new URL(request.url).searchParams.get("embedded"),
-      hasHost: Boolean(new URL(request.url).searchParams.get("host")),
-      secFetchDest: request.headers.get("sec-fetch-dest"),
-      isEmbeddedOAuthRequest: isEmbeddedOAuthRequest(request),
-    },
-  });
-}
-
 export function renderAuthTopLevelEscapePage(
   request: Request,
   appUrl: string,
@@ -210,8 +113,6 @@ export function renderAuthTopLevelEscapePage(
     });
   }
 
-  logOAuthEscapeBeforeBegin(request, shop);
-  logOAuthEmbeddedDetected(request, shop);
   recordAuthFlowStep(request, "oauth_escape_before_begin", {
     shop,
     pathname: url.pathname,
@@ -219,17 +120,6 @@ export function renderAuthTopLevelEscapePage(
 
   const topLevelAuthUrl = buildTopLevelOAuthBeginUrl(request, appUrl);
   const apiKey = process.env.SHOPIFY_API_KEY?.trim() ?? "";
-
-  logListingFixEvent({
-    action: "auth_redirect",
-    shop,
-    meta: {
-      event: "oauth_top_level_escape_page",
-      oauth_top_level_auth_url: topLevelAuthUrl,
-      strategy: "app_bridge_html_before_begin",
-      oauth_top_level_redirect: true,
-    },
-  });
 
   const headers = new Headers({
     "content-type": "text/html;charset=utf-8",
@@ -248,11 +138,6 @@ export function renderAuthTopLevelEscapePage(
 export function redirectEmbeddedAuthToTopLevelEscape(
   request: Request,
 ): never {
-  logOAuthEscapeBeforeBegin(
-    request,
-    new URL(request.url).searchParams.get("shop"),
-  );
-
   throw redirect(buildAuthTopLevelEscapeUrl(request));
 }
 
@@ -260,36 +145,17 @@ export function appendClearOAuthInProgressCookie(headers: Headers): void {
   headers.append("set-cookie", buildClearOAuthInProgressCookie());
 }
 
-export function logExitIframeRouteEntered(request: Request): void {
-  const url = new URL(request.url);
-  const authorizeUrl = url.searchParams.get("exitIframe");
-
-  logListingFixEvent({
-    action: "oauth_start",
-    shop: url.searchParams.get("shop"),
-    meta: {
-      event: "escaped_iframe_for_oauth",
-      pathname: url.pathname,
-      oauth_redirect_location: authorizeUrl,
-      auth_response_location: authorizeUrl,
-      hasExitIframeParam: Boolean(authorizeUrl),
-    },
-  });
-
-  if (authorizeUrl) {
-    logOAuthEscapeTopLevelStarted(
-      request,
-      url.searchParams.get("shop"),
-      authorizeUrl,
-      "exit_iframe_redirect",
-    );
-  }
+export function logOAuthInProgressSkip(_request: Request, _shop: string | null): void {
+  // Reserved for auth debug tooling only.
 }
 
-function safeUrlHost(value: string): string | null {
-  try {
-    return new URL(value).host;
-  } catch {
-    return null;
-  }
+export function logOAuthEmbeddedDetected(
+  _request: Request,
+  _shop: string | null,
+): void {
+  // Reserved for auth debug tooling only.
+}
+
+export function logExitIframeRouteEntered(_request: Request): void {
+  // Reserved for auth debug tooling only.
 }

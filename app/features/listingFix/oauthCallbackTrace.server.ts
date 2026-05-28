@@ -6,43 +6,18 @@ import {
 } from "@shopify/shopify-api";
 import type { Session } from "@shopify/shopify-api";
 
-import {
-  getOAuthBeginCookieSnapshot,
-  clearOAuthBeginCookieSnapshot,
-} from "./oauthBeginCookieSnapshot.server";
+import { clearOAuthBeginCookieSnapshot } from "./oauthBeginCookieSnapshot.server";
 import {
   classifyOAuthCallbackError,
   logOAuthCallbackValidationFailure,
 } from "./oauthCallbackDiagnostics.server";
-import type { OAuthCallbackPreValidation } from "./oauthCallbackPreValidation.server";
-import { STATE_COOKIE_NAME } from "./oauthCookiePolicy.server";
-import { recordAuthFlowStep } from "./authFlowTelemetry.server";
+import { isAuthDebugEnabled } from "./authDebugEnv.server";
 import {
   logAfterAuthPhase,
   logAuthCallbackCompleted,
   logOAuthCallbackError,
 } from "./oauthSessionDiagnostics.server";
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
-
-function getCookieNames(cookieHeader: string | null): string[] {
-  if (!cookieHeader) return [];
-
-  return cookieHeader
-    .split(";")
-    .map((part) => part.trim().split("=")[0])
-    .filter(Boolean);
-}
-
-function countCookieOccurrences(
-  cookieHeader: string | null,
-  name: string,
-): number {
-  if (!cookieHeader) return 0;
-
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`(?:^|;\\s*)${escaped}=`, "g");
-  return cookieHeader.match(pattern)?.length ?? 0;
-}
 
 function extractErrorStack(error: unknown): string | undefined {
   if (!(error instanceof Error) || !error.stack) return undefined;
@@ -71,110 +46,45 @@ export function oauthCallbackHttpStatus(error: unknown): number {
   return 500;
 }
 
-export function logOAuthCallbackPhase(
-  phase: string,
-  shop: string | null,
-  meta?: Record<string, string | number | boolean | null | undefined>,
-): void {
-  logListingFixEvent({
-    action: phase.includes("failure") ? "session_missing" : "oauth_start",
-    shop,
-    meta: {
-      event: phase,
-      ...meta,
-    },
-  });
-}
-
 export function logOAuthCallbackRequestContext(request: Request): void {
+  if (!isAuthDebugEnabled()) return;
+
   const url = new URL(request.url);
   const shop = url.searchParams.get("shop");
-  const cookieHeader = request.headers.get("cookie");
-  const cookieNames = getCookieNames(cookieHeader);
-
-  logOAuthCallbackPhase("oauth_callback_entered", shop, {
-    route: "auth.callback",
-    pathname: url.pathname,
-    oauth_callback_shop_present: Boolean(shop),
-    oauth_callback_code_present: Boolean(url.searchParams.get("code")),
-    oauth_callback_state_present: Boolean(url.searchParams.get("state")),
-    oauth_callback_hmac_present: Boolean(url.searchParams.get("hmac")),
-    oauth_callback_timestamp_present: Boolean(url.searchParams.get("timestamp")),
-    cookieHeaderPresent: Boolean(cookieHeader),
-    oauth_callback_cookie_header_present: Boolean(cookieHeader),
-    callback_cookie_names: cookieNames.join(","),
-    stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
-  });
-
-  recordAuthFlowStep(request, "oauth_callback_entered", {
-    shop,
-    pathname: url.pathname,
-    cookieHeaderPresent: Boolean(cookieHeader),
-    stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
-    oauth_callback_cookie_header_present: Boolean(cookieHeader),
-  });
-}
-
-export function logOAuthCallbackCookieDiagnostics(
-  request: Request,
-  shop: string | null,
-  error: unknown,
-  preValidation?: OAuthCallbackPreValidation | null,
-): void {
-  const cookieHeader = request.headers.get("cookie");
-  const cookieNames = getCookieNames(cookieHeader);
-  const beginSnapshot = getOAuthBeginCookieSnapshot(shop);
-
-  const url = new URL(request.url);
-  const queryState = url.searchParams.get("state");
-  const duplicateStateCookieCount = countCookieOccurrences(
-    cookieHeader,
-    STATE_COOKIE_NAME,
-  );
 
   logListingFixEvent({
-    action: "session_missing",
+    action: "oauth_start",
     shop,
-    message: error,
     meta: {
-      event: "oauth_callback_cookie_diagnostics",
-      failureType: classifyOAuthCallbackError(error),
-      callbackCookieHeader: cookieHeader ?? null,
-      callback_cookie_names: cookieNames.join(","),
-      callbackCookieHeaderPresent: Boolean(cookieHeader),
-      callbackStateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
-      oauth_callback_state_query: queryState,
-      duplicate_state_cookie_detected: duplicateStateCookieCount > 1,
-      duplicate_state_cookie_count: duplicateStateCookieCount,
-      oauthBeginSetCookies: beginSnapshot?.setCookies.join(" | ") ?? null,
-      oauthBeginSetCookieCount: beginSnapshot?.setCookies.length ?? 0,
-      oauthBeginSnapshotAgeMs: beginSnapshot
-        ? Date.now() - beginSnapshot.capturedAt
-        : null,
-      callback_hmac_valid: preValidation?.callback_hmac_valid ?? null,
-      callback_hmac_expected_prefix:
-        preValidation?.callback_hmac_expected_prefix ?? null,
-      callback_hmac_received_prefix:
-        preValidation?.callback_hmac_received_prefix ?? null,
-      callback_state_matches_cookie:
-        preValidation?.callback_state_matches_cookie ?? null,
-      callback_hmac_validation_error:
-        preValidation?.callback_hmac_validation_error ?? null,
-      message: formatOAuthCallbackErrorMessage(error),
-      errorStack: extractErrorStack(error),
+      event: "oauth_callback_entered",
+      route: "auth.callback",
+      pathname: url.pathname,
+      oauth_callback_code_present: Boolean(url.searchParams.get("code")),
+      oauth_callback_state_present: Boolean(url.searchParams.get("state")),
     },
   });
 }
 
 export function logShopifyAuthCallbackStart(shop: string | null): void {
-  logOAuthCallbackPhase("shopify_auth_callback_start", shop);
+  if (!isAuthDebugEnabled()) return;
+
+  logListingFixEvent({
+    action: "oauth_start",
+    shop,
+    meta: { event: "shopify_auth_callback_start" },
+  });
 }
 
 export function logShopifyAuthCallbackSuccess(session: Session): void {
-  logOAuthCallbackPhase("shopify_auth_callback_success", session.shop, {
-    sessionId: session.id,
-    isOnline: session.isOnline,
-    accessTokenPresent: Boolean(session.accessToken),
+  logListingFixEvent({
+    action: "oauth_complete",
+    shop: session.shop,
+    meta: {
+      event: "shopify_auth_callback_success",
+      sessionId: session.id,
+      isOnline: session.isOnline,
+      accessTokenPresent: Boolean(session.accessToken),
+    },
   });
 }
 
@@ -182,30 +92,52 @@ export function logShopifyAuthCallbackFailure(
   shop: string | null,
   error: unknown,
 ): void {
-  logOAuthCallbackPhase("shopify_auth_callback_failure", shop, {
-    failureType: classifyOAuthCallbackError(error),
-    message: formatOAuthCallbackErrorMessage(error),
-    errorStack: extractErrorStack(error),
+  logListingFixEvent({
+    action: "session_missing",
+    shop,
+    message: error,
+    meta: {
+      event: "shopify_auth_callback_failure",
+      failureType: classifyOAuthCallbackError(error),
+      message: formatOAuthCallbackErrorMessage(error),
+      errorStack: extractErrorStack(error),
+    },
   });
 }
 
 export function logAfterAuthSuccess(session: Session): void {
-  logOAuthCallbackPhase("afterAuth_success", session.shop, {
-    sessionId: session.id,
+  logListingFixEvent({
+    action: "oauth_complete",
+    shop: session.shop,
+    meta: {
+      event: "afterAuth_success",
+      sessionId: session.id,
+    },
   });
 }
 
 export function logAfterAuthFailure(session: Session, error: unknown): void {
-  logOAuthCallbackPhase("afterAuth_failure", session.shop, {
-    sessionId: session.id,
-    message: formatOAuthCallbackErrorMessage(error),
-    errorStack: extractErrorStack(error),
+  logListingFixEvent({
+    action: "session_missing",
+    shop: session.shop,
+    message: error,
+    meta: {
+      event: "afterAuth_failure",
+      sessionId: session.id,
+      message: formatOAuthCallbackErrorMessage(error),
+      errorStack: extractErrorStack(error),
+    },
   });
 }
 
 export function logPrismaStoreSessionSuccess(session: Session): void {
-  logOAuthCallbackPhase("prisma_storeSession_success", session.shop, {
-    sessionId: session.id,
+  logListingFixEvent({
+    action: "oauth_complete",
+    shop: session.shop,
+    meta: {
+      event: "prisma_storeSession_success",
+      sessionId: session.id,
+    },
   });
 }
 
@@ -213,10 +145,16 @@ export function logPrismaStoreSessionFailure(
   session: Session,
   error: unknown,
 ): void {
-  logOAuthCallbackPhase("prisma_storeSession_failure", session.shop, {
-    sessionId: session.id,
-    message: formatOAuthCallbackErrorMessage(error),
-    errorStack: extractErrorStack(error),
+  logListingFixEvent({
+    action: "session_missing",
+    shop: session.shop,
+    message: error,
+    meta: {
+      event: "prisma_storeSession_failure",
+      sessionId: session.id,
+      message: formatOAuthCallbackErrorMessage(error),
+      errorStack: extractErrorStack(error),
+    },
   });
 }
 
@@ -235,51 +173,25 @@ export function buildOAuthCallbackErrorResponse(error: unknown): Response {
 export function logOAuthCallbackUnhandledFailure(
   shop: string | null,
   error: unknown,
-  request: Request,
-  preValidation?: OAuthCallbackPreValidation | null,
+  _request: Request,
 ): void {
-  logOAuthCallbackValidationFailure(shop, error, preValidation);
+  logOAuthCallbackValidationFailure(shop, error);
   logOAuthCallbackError(shop, error);
-
-  if (
-    error instanceof CookieNotFound ||
-    error instanceof InvalidOAuthError ||
-    error instanceof InvalidHmacError
-  ) {
-    logOAuthCallbackCookieDiagnostics(request, shop, error, preValidation);
-  }
-
-  logListingFixEvent({
-    action: "session_missing",
-    shop,
-    message: error,
-    meta: {
-      event: "oauth_callback_unhandled_failure",
-      failureType: classifyOAuthCallbackError(error),
-      message: formatOAuthCallbackErrorMessage(error),
-      errorStack: extractErrorStack(error),
-      httpStatus: oauthCallbackHttpStatus(error),
-      callback_hmac_valid: preValidation?.callback_hmac_valid ?? null,
-      callback_hmac_expected_prefix:
-        preValidation?.callback_hmac_expected_prefix ?? null,
-      callback_hmac_received_prefix:
-        preValidation?.callback_hmac_received_prefix ?? null,
-      callback_state_matches_cookie:
-        preValidation?.callback_state_matches_cookie ?? null,
-      redirect_uri_matches_expected:
-        preValidation?.redirect_uri_matches_expected ?? null,
-      configured_api_key_matches_toml_client_id:
-        preValidation?.configured_api_key_matches_toml_client_id ?? null,
-    },
-  });
 }
 
 export function logOAuthCallbackRedirectReady(
   shop: string,
   redirectUrl: string,
 ): void {
-  logOAuthCallbackPhase("oauth_callback_redirect_ready", shop, {
-    redirectUrl,
+  if (!isAuthDebugEnabled()) return;
+
+  logListingFixEvent({
+    action: "oauth_complete",
+    shop,
+    meta: {
+      event: "oauth_callback_redirect_ready",
+      redirectUrl,
+    },
   });
 }
 

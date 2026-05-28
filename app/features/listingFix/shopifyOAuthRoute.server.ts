@@ -1,14 +1,6 @@
 import { redirect } from "react-router";
 
-import {
-  logOAuthBeginResponse,
-  logOAuthCallbackQuery,
-  logOAuthCallbackValidationSuccess,
-} from "./oauthCallbackDiagnostics.server";
-import {
-  logOAuthCallbackPreValidation,
-  runOAuthCallbackPreValidation,
-} from "./oauthCallbackPreValidation.server";
+import { logOAuthCallbackValidationSuccess } from "./oauthCallbackDiagnostics.server";
 import {
   buildOAuthCallbackErrorResponse,
   clearOAuthBeginCookieSnapshot,
@@ -27,20 +19,11 @@ import {
 } from "./oauthCallbackTrace.server";
 import {
   appendClearOAuthInProgressCookie,
-  logOAuthEmbeddedDetected,
   redirectEmbeddedAuthToTopLevelEscape,
   shouldDeferOAuthBeginToTopLevel,
 } from "./embeddedOAuthEscape.server";
 import { applyEmbeddedOAuthCookiePolicy } from "./oauthCookiePolicy.server";
 import { recordAuthFlowStep } from "./authFlowTelemetry.server";
-import {
-  countSetCookieHeaders,
-  extractSetCookieHeaders,
-} from "./setCookieHeaders.server";
-import {
-  logAuthRouteEntered,
-  logOAuthRouteEntered,
-} from "./oauthSessionDiagnostics.server";
 import { getOfflineSessionId, verifyPrismaSessionPersisted } from "./sessionPersistence.server";
 import { listingFixShopifyApi } from "./shopifyApi.server";
 import { logListingFixEvent, sanitizeErrorMessage } from "./telemetry";
@@ -72,10 +55,6 @@ function isAuthTopLevelPath(pathname: string): boolean {
 
 function isAuthRootPath(pathname: string): boolean {
   return pathname === "/auth" || pathname.endsWith("/auth");
-}
-
-function buildRedirectUri(appUrl: string, callbackPath: string): string {
-  return `${appUrl.replace(/\/$/, "")}${callbackPath}`;
 }
 
 function toResponseHeaders(headers: unknown): Headers {
@@ -125,7 +104,6 @@ export async function handleOAuthCallbackRoute(
   route: string,
 ): Promise<Response> {
   logOAuthCallbackRequestContext(request);
-  logOAuthCallbackQuery(request);
 
   const url = new URL(request.url);
   const shop = url.searchParams.get("shop");
@@ -137,27 +115,7 @@ export async function handleOAuthCallbackRoute(
     );
   }
 
-  let preValidation: Awaited<
-    ReturnType<typeof runOAuthCallbackPreValidation>
-  > | null = null;
-
   try {
-    preValidation = await runOAuthCallbackPreValidation(request, {
-      appUrl: deps.appUrl,
-      authCallbackPath: deps.authCallbackPath,
-    });
-    logOAuthCallbackPreValidation(request, preValidation);
-    recordAuthFlowStep(request, "oauth_callback_pre_validation", {
-      shop: preValidation.callback_shop,
-      callback_hmac_valid: preValidation.callback_hmac_valid,
-      callback_state_matches_cookie: preValidation.callback_state_matches_cookie,
-      duplicate_state_cookie_detected:
-        preValidation.duplicate_state_cookie_detected,
-      redirect_uri_matches_expected: preValidation.redirect_uri_matches_expected,
-      configured_api_key_matches_toml_client_id:
-        preValidation.configured_api_key_matches_toml_client_id,
-    });
-
     logShopifyAuthCallbackStart(shop);
 
     const callbackResult = await listingFixShopifyApi.auth.callback({
@@ -246,7 +204,7 @@ export async function handleOAuthCallbackRoute(
     }
 
     logShopifyAuthCallbackFailure(shop, error);
-    logOAuthCallbackUnhandledFailure(shop, error, request, preValidation);
+    logOAuthCallbackUnhandledFailure(shop, error, request);
     recordAuthFlowStep(request, "oauth_callback_validation_failure", {
       shop,
       failureType: error instanceof Error ? error.name : "unknown",
@@ -275,34 +233,22 @@ export async function handleOAuthAuthRoute(
   }
 
   if (isAuthRootPath(pathname) && shop && !isCallback) {
-    logOAuthRouteEntered(pathname, shop, {
-      route: "auth._index",
-      event: "oauth_begin_start",
-    });
-    logAuthRouteEntered(pathname, shop, {
-      event: "auth_begin_entered",
-      route: "oauth.begin",
-    });
-
     if (shouldDeferOAuthBeginToTopLevel(request)) {
-      logOAuthEmbeddedDetected(request, shop);
       redirectEmbeddedAuthToTopLevelEscape(request);
     }
 
-    const redirectUri = buildRedirectUri(deps.appUrl, deps.authCallbackPath);
-
-    logAuthRouteEntered(pathname, shop, {
-      event: "oauth_top_level_auth_begin",
-      redirectUri,
-      callbackPath: deps.authCallbackPath,
-      embedded: new URL(request.url).searchParams.get("embedded"),
-      secFetchDest: request.headers.get("sec-fetch-dest"),
+    logListingFixEvent({
+      action: "oauth_start",
+      shop,
+      meta: {
+        event: "oauth_begin",
+        pathname,
+      },
     });
 
     recordAuthFlowStep(request, "auth_begin_start", {
       pathname,
       shop,
-      redirectUri,
     });
 
     const rawBeginResponse = (await listingFixShopifyApi.auth.begin({
@@ -312,46 +258,9 @@ export async function handleOAuthAuthRoute(
       rawRequest: request,
     })) as Response;
 
-    const authBeginSetCookieCount = countSetCookieHeaders(
-      rawBeginResponse.headers,
-    );
-
-    const { response: beginResponse, setCookies } =
-      applyEmbeddedOAuthCookiePolicy(rawBeginResponse, request);
-
-    logListingFixEvent({
-      action: "oauth_start",
-      shop,
-      meta: {
-        event: "oauth_top_level_set_cookie_count",
-        oauth_top_level_set_cookie_count: authBeginSetCookieCount,
-        policy_set_cookie_count: setCookies.length,
-        auth_begin_set_cookie_count: authBeginSetCookieCount,
-        rawSetCookieNames: extractSetCookieHeaders(rawBeginResponse.headers)
-          .map((cookie) => cookie.split("=")[0])
-          .join(","),
-      },
-    });
-
-    recordAuthFlowStep(request, "auth_begin_set_cookie_count", {
-      shop,
-      auth_begin_set_cookie_count: authBeginSetCookieCount,
-      policy_set_cookie_count: setCookies.length,
-    });
-
-    const authorizeUrl = beginResponse.headers.get("location");
-    if (authorizeUrl) {
-      recordAuthFlowStep(request, "oauth_authorize_url", {
-        shop,
-        oauth_redirect_location: authorizeUrl,
-      });
-    }
-
-    logOAuthBeginResponse(
+    const { response: beginResponse } = applyEmbeddedOAuthCookiePolicy(
+      rawBeginResponse,
       request,
-      beginResponse,
-      redirectUri,
-      deps.authCallbackPath,
     );
 
     return beginResponse;

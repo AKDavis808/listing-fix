@@ -11,8 +11,10 @@ import {
   loadDotEnv,
   writeAuthDebugReport,
 } from "./lib/auth-debug-report.mjs";
+import { requireAuthDebugEnabled } from "./lib/auth-debug-env.mjs";
 
 loadDotEnv();
+requireAuthDebugEnabled("auth:e2e");
 
 const appUrl = (process.env.SHOPIFY_APP_URL ?? EXPECTED_PRODUCTION_APP_URL).replace(
   /\/$/,

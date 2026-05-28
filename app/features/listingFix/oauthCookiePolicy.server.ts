@@ -4,7 +4,6 @@ import {
   appendSetCookieHeaders,
   extractSetCookieHeaders,
 } from "./setCookieHeaders.server";
-import { logListingFixEvent } from "./telemetry";
 
 const STATE_COOKIE_NAME = "shopify_app_state";
 const SHOPIFY_STATE_SIG_COOKIE = `${STATE_COOKIE_NAME}.sig`;
@@ -40,18 +39,7 @@ export function shouldUseEmbeddedOAuthCookiePolicy(request: Request): boolean {
 }
 
 export function logOAuthCookiePolicyStartup(): void {
-  logListingFixEvent({
-    action: "session_restored",
-    meta: {
-      event: "oauth_cookie_policy_startup",
-      oauth_cookie_samesite: EMBEDDED_OAUTH_COOKIE_SAME_SITE,
-      oauth_cookie_secure: true,
-      oauth_cookie_path: EMBEDDED_OAUTH_COOKIE_PATH,
-      httpsProductionApp: isHttpsProductionApp(),
-      shopifyAppUrl: appUrl || null,
-      nodeEnv: process.env.NODE_ENV ?? "development",
-    },
-  });
+  // Startup cookie policy is applied silently in production.
 }
 
 function getSetCookieHeaders(headers: Headers): string[] {
@@ -68,16 +56,6 @@ export function applyEmbeddedOAuthCookiePolicy(
   request: Request,
 ): EmbeddedOAuthCookiePolicyResult {
   if (!shouldUseEmbeddedOAuthCookiePolicy(request)) {
-    logListingFixEvent({
-      action: "oauth_start",
-      shop: new URL(request.url).searchParams.get("shop"),
-      meta: {
-        event: "oauth_cookie_policy_skipped",
-        oauth_cookie_samesite: "lax",
-        oauth_cookie_secure: isHttpsProductionApp(),
-        reason: "non_embedded_non_production_context",
-      },
-    });
     return {
       response,
       setCookies: extractSetCookieHeaders(response.headers),
@@ -99,37 +77,10 @@ export function applyEmbeddedOAuthCookiePolicy(
     ...rewrittenCookies,
   ]);
 
-  const stateCookie = rewrittenCookies.find((cookie) =>
-    cookie.startsWith(`${STATE_COOKIE_NAME}=`),
-  );
-
-  const originalStateCookie = originalCookies.find((cookie) =>
-    cookie.startsWith(`${STATE_COOKIE_NAME}=`),
-  );
-
   const shop = new URL(request.url).searchParams.get("shop");
   if (shop) {
     rememberOAuthBeginCookies(shop, rewrittenCookies);
   }
-
-  logListingFixEvent({
-    action: "oauth_start",
-    shop: new URL(request.url).searchParams.get("shop"),
-    meta: {
-      event: "oauth_cookie_policy_applied",
-      oauth_cookie_samesite: EMBEDDED_OAUTH_COOKIE_SAME_SITE,
-      oauth_cookie_secure: true,
-      oauth_cookie_path: EMBEDDED_OAUTH_COOKIE_PATH,
-      originalSetCookiePath: originalStateCookie
-        ? extractCookiePath(originalStateCookie)
-        : null,
-      rewrittenSetCookiePath: stateCookie ? extractCookiePath(stateCookie) : null,
-      embedded: isEmbeddedOAuthContext(request),
-      httpsProductionApp: isHttpsProductionApp(),
-      stateCookieRewritten: Boolean(stateCookie),
-      setCookieCount: rewrittenCookies.length,
-    },
-  });
 
   return {
     response: new Response(response.body, {
@@ -167,11 +118,6 @@ export function buildOAuthStateClearanceCookies(): string[] {
   );
 }
 
-function extractCookiePath(setCookie: string): string | null {
-  const match = setCookie.match(/;\s*Path=([^;]+)/i);
-  return match?.[1]?.trim() ?? null;
-}
-
 function rewriteEmbeddedOAuthCookie(setCookie: string): string {
   let cookie = setCookie;
 
@@ -195,29 +141,8 @@ function rewriteEmbeddedOAuthCookie(setCookie: string): string {
   return cookie;
 }
 
-export function logCallbackCookiePresence(request: Request): void {
-  const cookieHeader = request.headers.get("cookie") ?? "";
-  const cookieNames = cookieHeader
-    .split(";")
-    .map((part) => part.trim().split("=")[0])
-    .filter(Boolean);
-
-  logListingFixEvent({
-    action: "oauth_start",
-    shop: new URL(request.url).searchParams.get("shop"),
-    meta: {
-      event: "callback_cookie_present",
-      callback_cookie_present: cookieNames.includes(STATE_COOKIE_NAME),
-      callback_cookie_names: cookieNames.join(","),
-      callback_state_sig_present: cookieNames.includes(SHOPIFY_STATE_SIG_COOKIE),
-      oauth_cookie_samesite: EMBEDDED_OAUTH_COOKIE_SAME_SITE,
-      oauth_cookie_secure: true,
-      oauth_cookie_path: EMBEDDED_OAUTH_COOKIE_PATH,
-      cookieHeaderPresent: Boolean(cookieHeader),
-      stateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
-      cookieNames: cookieNames.join(","),
-    },
-  });
+export function logCallbackCookiePresence(_request: Request): void {
+  // Reserved for auth debug tooling only.
 }
 
 export { STATE_COOKIE_NAME };
