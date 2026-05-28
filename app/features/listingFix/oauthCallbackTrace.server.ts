@@ -112,6 +112,9 @@ export function logOAuthCallbackCookieDiagnostics(
   const cookieNames = getCookieNames(cookieHeader);
   const beginSnapshot = getOAuthBeginCookieSnapshot(shop);
 
+  const url = new URL(request.url);
+  const queryState = url.searchParams.get("state");
+
   logListingFixEvent({
     action: "session_missing",
     shop,
@@ -123,11 +126,15 @@ export function logOAuthCallbackCookieDiagnostics(
       callback_cookie_names: cookieNames.join(","),
       callbackCookieHeaderPresent: Boolean(cookieHeader),
       callbackStateCookiePresent: cookieNames.includes(STATE_COOKIE_NAME),
+      oauth_callback_state_query: queryState,
       oauthBeginSetCookies: beginSnapshot?.setCookies.join(" | ") ?? null,
       oauthBeginSetCookieCount: beginSnapshot?.setCookies.length ?? 0,
       oauthBeginSnapshotAgeMs: beginSnapshot
         ? Date.now() - beginSnapshot.capturedAt
         : null,
+      likelyDuplicateStateCookie:
+        error instanceof InvalidOAuthError &&
+        cookieNames.includes(STATE_COOKIE_NAME),
       message: formatOAuthCallbackErrorMessage(error),
       errorStack: extractErrorStack(error),
     },

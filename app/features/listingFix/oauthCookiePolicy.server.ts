@@ -8,6 +8,7 @@ import { logListingFixEvent } from "./telemetry";
 
 const STATE_COOKIE_NAME = "shopify_app_state";
 const SHOPIFY_STATE_SIG_COOKIE = `${STATE_COOKIE_NAME}.sig`;
+const OAUTH_STATE_CLEAR_PATHS = ["/", "/auth", "/auth/callback"] as const;
 
 export const EMBEDDED_OAUTH_COOKIE_SAME_SITE = "none" as const;
 export const EMBEDDED_OAUTH_COOKIE_PATH = "/" as const;
@@ -92,11 +93,11 @@ export function applyEmbeddedOAuthCookiePolicy(
     rewriteEmbeddedOAuthCookie(cookie),
   );
 
-  const headers = new Headers();
-  response.headers.forEach((value, key) => {
-    headers.append(key, value);
-  });
-  appendSetCookieHeaders(headers, rewrittenCookies);
+  const headers = copyResponseHeadersWithoutSetCookie(response);
+  appendSetCookieHeaders(headers, [
+    ...buildOAuthStateClearanceCookies(),
+    ...rewrittenCookies,
+  ]);
 
   const stateCookie = rewrittenCookies.find((cookie) =>
     cookie.startsWith(`${STATE_COOKIE_NAME}=`),
@@ -138,6 +139,32 @@ export function applyEmbeddedOAuthCookiePolicy(
     }),
     setCookies: rewrittenCookies,
   };
+}
+
+function copyResponseHeadersWithoutSetCookie(response: Response): Headers {
+  const headers = new Headers();
+
+  response.headers.forEach((value, key) => {
+    if (key.toLowerCase() === "set-cookie") {
+      return;
+    }
+
+    headers.append(key, value);
+  });
+
+  return headers;
+}
+
+function buildOAuthStateClearanceCookie(name: string, path: string): string {
+  return `${name}=; Path=${path}; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=None`;
+}
+
+export function buildOAuthStateClearanceCookies(): string[] {
+  return [STATE_COOKIE_NAME, SHOPIFY_STATE_SIG_COOKIE].flatMap((name) =>
+    OAUTH_STATE_CLEAR_PATHS.map((path) =>
+      buildOAuthStateClearanceCookie(name, path),
+    ),
+  );
 }
 
 function extractCookiePath(setCookie: string): string | null {

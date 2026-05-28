@@ -33,12 +33,15 @@ if (!adminUrl) {
 }
 
 const screenshotDir = join(process.cwd(), ".auth-debug", "screenshots");
+const chromeProfileDir = join(process.cwd(), ".auth-debug", "chrome-profile");
 mkdirSync(screenshotDir, { recursive: true });
+mkdirSync(chromeProfileDir, { recursive: true });
 
 /** @type {Array<{url: string, status?: number, setCookieCount?: number, cookieHeader?: string | null}>} */
 const navigations = [];
 let failureScreenshot = null;
 let finalPageText = "";
+let browserMode = "chrome-persistent";
 
 function countSetCookie(headers) {
   if (!headers) return 0;
@@ -47,11 +50,58 @@ function countSetCookie(headers) {
   return Array.isArray(values) ? values.length : 1;
 }
 
-console.log(`[auth:e2e] Opening ${adminUrl}`);
+function buildBrowserLaunchOptions() {
+  const usePlaywrightChromium = process.env.AUTH_E2E_BROWSER === "chromium";
 
-const browser = await chromium.launch({ headless: false });
-const context = await browser.newContext();
-const page = await context.newPage();
+  if (usePlaywrightChromium) {
+    browserMode = "playwright-chromium";
+    return {
+      headless: false,
+      args: ["--disable-blink-features=AutomationControlled"],
+      ignoreDefaultArgs: ["--enable-automation"],
+    };
+  }
+
+  browserMode = "chrome-persistent";
+  return {
+    headless: false,
+    channel: "chrome",
+    args: ["--disable-blink-features=AutomationControlled"],
+    ignoreDefaultArgs: ["--enable-automation"],
+    viewport: { width: 1400, height: 900 },
+  };
+}
+
+async function openAuthE2eBrowser() {
+  const launchOptions = buildBrowserLaunchOptions();
+  const usePlaywrightChromium = process.env.AUTH_E2E_BROWSER === "chromium";
+
+  if (usePlaywrightChromium) {
+    const browser = await chromium.launch(launchOptions);
+    const context = await browser.newContext({
+      viewport: { width: 1400, height: 900 },
+    });
+    const page = await context.newPage();
+    return { browser, context, page, close: () => browser.close() };
+  }
+
+  const context = await chromium.launchPersistentContext(
+    chromeProfileDir,
+    launchOptions,
+  );
+  const page = context.pages()[0] ?? (await context.newPage());
+  return { browser: null, context, page, close: () => context.close() };
+}
+
+console.log(`[auth:e2e] Opening ${adminUrl}`);
+console.log(
+  `[auth:e2e] Browser: ${browserMode} (profile: ${chromeProfileDir})`,
+);
+console.log(
+  "[auth:e2e] Tip: if Google blocks sign-in, use Shopify email/password or set AUTH_E2E_BROWSER=chromium only for cookie tracing.",
+);
+
+const { page, close: closeBrowser } = await openAuthE2eBrowser();
 
 page.on("response", async (response) => {
   try {
@@ -116,7 +166,7 @@ try {
   await page.screenshot({ path: failureScreenshot, fullPage: true }).catch(() => {});
   throw error;
 } finally {
-  await browser.close();
+  await closeBrowser();
 }
 
 const callbackNav = navigations.find((nav) => nav.url.includes("/auth/callback"));
@@ -129,6 +179,7 @@ const auth302 = navigations.find(
 );
 
 const e2eSummary = [
+  `Browser mode: ${browserMode}`,
   `Admin URL: ${adminUrl}`,
   `Navigations captured: ${navigations.length}`,
   `Auth Set-Cookie observed: ${auth302?.setCookieCount ?? 0}`,
