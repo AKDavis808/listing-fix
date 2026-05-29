@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 
+import { recordProductFieldApplyLog } from "../features/listingFix/productApplyAudit.server";
 import {
   endTimer,
   logListingFixEvent,
@@ -7,23 +8,33 @@ import {
 } from "../features/listingFix/telemetry";
 import { incrementApplyUsage } from "../features/listingFix/usage.server";
 import { authenticate } from "../shopify.server";
+import { fetchProductById } from "../services/listingProducts.server";
 import {
+  applyApprovedListingFields,
   assertProductGid,
+  normalizeDescriptionHtmlForShopify,
   updateProductDescription,
-  updateProductSEO,
+  updateProductSeoFields,
   updateProductTags,
   updateProductTitle,
+  type ListingFieldBatchInput,
   type ProductFieldUpdateFailure,
   type ProductFieldUpdateResult,
 } from "../services/shopifyProductUpdates.server";
 
-export type ApplyListingFieldKind = "title" | "description" | "tags" | "seo";
+export type ApplyListingFieldKind =
+  | "title"
+  | "description"
+  | "tags"
+  | "seo"
+  | "all";
 
 export type ApplyListingFieldActionData =
   | {
       ok: true;
       productId: string;
       field: ApplyListingFieldKind;
+      fieldsUpdated: string[];
       requestToken: string;
     }
   | {
@@ -35,9 +46,22 @@ export type ApplyListingFieldActionData =
       requestToken: string;
     };
 
+const ALLOWED_FIELDS = new Set<ApplyListingFieldKind>([
+  "title",
+  "description",
+  "tags",
+  "seo",
+  "all",
+]);
+
 function extractRequestToken(formData: FormData): string {
   const raw = formData.get("requestToken");
   return typeof raw === "string" ? raw : "";
+}
+
+function readString(formData: FormData, key: string): string | undefined {
+  const raw = formData.get(key);
+  return typeof raw === "string" ? raw : undefined;
 }
 
 function logApplyFailure(
@@ -55,6 +79,88 @@ function logApplyFailure(
     message,
     meta: { field },
   });
+}
+
+async function loadPreviousValues(
+  admin: Parameters<typeof fetchProductById>[0],
+  productId: string,
+) {
+  const snapshot = await fetchProductById(admin, productId);
+  if (!snapshot) return null;
+  return {
+    title: snapshot.title,
+    descriptionHtml: snapshot.descriptionHtml ?? "",
+    "seo.title": snapshot.seoTitle ?? "",
+    "seo.description": snapshot.seoDescription ?? "",
+    tags: snapshot.tags,
+  };
+}
+
+function buildNewValuesForAudit(
+  field: ApplyListingFieldKind,
+  formData: FormData,
+  fieldsUpdated: readonly string[],
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+
+  if (fieldsUpdated.includes("title")) {
+    const title = readString(formData, "title") ?? readString(formData, "value");
+    if (title?.trim()) out.title = title.trim();
+  }
+
+  if (fieldsUpdated.includes("descriptionHtml")) {
+    const description =
+      readString(formData, "descriptionHtml") ?? readString(formData, "value");
+    if (description?.trim()) {
+      out.descriptionHtml = normalizeDescriptionHtmlForShopify(description);
+    }
+  }
+
+  if (
+    fieldsUpdated.includes("seo.title") ||
+    fieldsUpdated.includes("seo.description")
+  ) {
+    const seoTitle = readString(formData, "seoTitle");
+    const seoDescription =
+      readString(formData, "seoDescription") ?? readString(formData, "value");
+    if (seoTitle?.trim()) out["seo.title"] = seoTitle.trim();
+    if (seoDescription?.trim()) out["seo.description"] = seoDescription.trim();
+  }
+
+  if (fieldsUpdated.includes("tags")) {
+    const raw = readString(formData, "tagsJson");
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          out.tags = parsed.filter((t): t is string => typeof t === "string");
+        }
+      } catch {
+        // Omit malformed tags from audit payload.
+      }
+    }
+  }
+
+  if (field === "all") {
+    const batch: ListingFieldBatchInput = {
+      title: readString(formData, "title"),
+      descriptionHtml: readString(formData, "descriptionHtml"),
+      seoTitle: readString(formData, "seoTitle"),
+      seoDescription: readString(formData, "seoDescription"),
+    };
+    if (batch.title?.trim()) out.title = batch.title.trim();
+    if (batch.descriptionHtml?.trim()) {
+      out.descriptionHtml = normalizeDescriptionHtmlForShopify(
+        batch.descriptionHtml,
+      );
+    }
+    if (batch.seoTitle?.trim()) out["seo.title"] = batch.seoTitle.trim();
+    if (batch.seoDescription?.trim()) {
+      out["seo.description"] = batch.seoDescription.trim();
+    }
+  }
+
+  return out;
 }
 
 export const action = async ({
@@ -97,11 +203,8 @@ export const action = async ({
   const resolvedProduct =
     typeof productRaw === "string" ? assertProductGid(productRaw) : null;
   const resolvedField =
-    fieldRaw === "title" ||
-    fieldRaw === "description" ||
-    fieldRaw === "tags" ||
-    fieldRaw === "seo"
-      ? fieldRaw
+    typeof fieldRaw === "string" && ALLOWED_FIELDS.has(fieldRaw as ApplyListingFieldKind)
+      ? (fieldRaw as ApplyListingFieldKind)
       : null;
 
   if (!resolvedProduct || !resolvedField) {
@@ -135,6 +238,8 @@ export const action = async ({
     meta: { field },
   });
 
+  const previousValues = await loadPreviousValues(admin, productId);
+
   function finalizeOutcome(
     outcome: ProductFieldUpdateResult,
   ): ApplyListingFieldActionData {
@@ -142,14 +247,32 @@ export const action = async ({
       void incrementApplyUsage(shop).catch(() => {
         // Usage tracking must not block successful Shopify updates.
       });
+      void recordProductFieldApplyLog({
+        shopDomain: shop,
+        productId,
+        fieldsApplied: outcome.fieldsUpdated,
+        previousValues: previousValues ?? undefined,
+        newValues: buildNewValuesForAudit(
+          field,
+          formData,
+          outcome.fieldsUpdated,
+        ),
+        source: "ai_suggestion_review",
+      });
       logListingFixEvent({
         action: "apply_success",
         shop,
         productId,
         durationMs: endTimer(timer),
-        meta: { field },
+        meta: { field, fieldsUpdated: outcome.fieldsUpdated },
       });
-      return { ok: true, productId, field, requestToken };
+      return {
+        ok: true,
+        productId,
+        field,
+        fieldsUpdated: outcome.fieldsUpdated,
+        requestToken,
+      };
     }
 
     logApplyFailure(shop, timer, productId, field, outcome.errorMessage);
@@ -177,8 +300,8 @@ export const action = async ({
   try {
     switch (field) {
       case "title": {
-        const value = formData.get("value");
-        if (typeof value !== "string") {
+        const value = readString(formData, "value");
+        if (!value) {
           return missingPayload("Missing title payload.");
         }
         return finalizeOutcome(
@@ -186,8 +309,8 @@ export const action = async ({
         );
       }
       case "description": {
-        const value = formData.get("value");
-        if (typeof value !== "string") {
+        const value = readString(formData, "value");
+        if (!value) {
           return missingPayload("Missing description payload.");
         }
         return finalizeOutcome(
@@ -195,15 +318,24 @@ export const action = async ({
         );
       }
       case "seo": {
-        const value = formData.get("value");
-        if (typeof value !== "string") {
-          return missingPayload("Missing SEO description payload.");
+        const seoTitle = readString(formData, "seoTitle");
+        const seoDescription =
+          readString(formData, "seoDescription") ?? readString(formData, "value");
+        if (!seoTitle || !seoDescription) {
+          return missingPayload("Missing SEO title or description payload.");
         }
-        return finalizeOutcome(await updateProductSEO(admin, productId, value));
+        return finalizeOutcome(
+          await updateProductSeoFields(
+            admin,
+            productId,
+            seoTitle,
+            seoDescription,
+          ),
+        );
       }
       case "tags": {
-        const raw = formData.get("tagsJson");
-        if (typeof raw !== "string") {
+        const raw = readString(formData, "tagsJson");
+        if (!raw) {
           return missingPayload("Missing tags payload.");
         }
 
@@ -241,6 +373,17 @@ export const action = async ({
         const tags = parsed.filter((t): t is string => typeof t === "string");
 
         return finalizeOutcome(await updateProductTags(admin, productId, tags));
+      }
+      case "all": {
+        const input: ListingFieldBatchInput = {
+          title: readString(formData, "title"),
+          descriptionHtml: readString(formData, "descriptionHtml"),
+          seoTitle: readString(formData, "seoTitle"),
+          seoDescription: readString(formData, "seoDescription"),
+        };
+        return finalizeOutcome(
+          await applyApprovedListingFields(admin, productId, input),
+        );
       }
     }
   } catch (error) {

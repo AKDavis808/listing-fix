@@ -12,13 +12,22 @@ import { fetchProductById } from "../services/listingProducts.server";
 import { generateProductListingSuggestions } from "../services/productAiSuggestions.server";
 import { recommendationsForIssues } from "../services/productRecommendations.server";
 
+export type ProductListingCurrentValues = {
+  title: string;
+  descriptionHtml: string;
+  seoTitle: string;
+  seoDescription: string;
+};
+
 export type AiSuggestionsActionData =
   | {
       ok: true;
       productId: string;
+      currentValues: ProductListingCurrentValues;
       suggestions: {
         improvedTitle: string;
         improvedDescription: string;
+        seoTitle: string;
         seoDescription: string;
         suggestedTags: string[];
         summary: string;
@@ -158,6 +167,12 @@ export const action = async ({
     return {
       ok: true,
       productId: snapshot.id,
+      currentValues: {
+        title: snapshot.title,
+        descriptionHtml: snapshot.descriptionHtml ?? "",
+        seoTitle: snapshot.seoTitle ?? "",
+        seoDescription: snapshot.seoDescription ?? "",
+      },
       suggestions: generated.value,
       requestToken,
     };

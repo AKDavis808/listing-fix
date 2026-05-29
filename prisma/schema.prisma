@@ -79,3 +79,16 @@ model CatalogScanSession {
 
   @@index([shopDomain, scanCompletedAt])
 }
+
+model ProductFieldApplyLog {
+  id             String   @id @default(cuid())
+  shopDomain     String
+  productId      String
+  fieldsApplied  Json
+  previousValues Json?
+  newValues      Json?
+  source         String   @default("ai_suggestion_review")
+  createdAt      DateTime @default(now())
+
+  @@index([shopDomain, productId, createdAt])
+}

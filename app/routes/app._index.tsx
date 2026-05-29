@@ -3,7 +3,6 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import type { ReactNode } from "react";
 import {
   useFetcher,
   useLoaderData,
@@ -37,6 +36,8 @@ import { ListingFixDashboardErrorBoundary } from "../components/listingFix/Listi
 import { ListingFixDashboardMetricTile } from "../components/listingFix/ListingFixDashboardMetricTile";
 import { ListingFixBetaUsageCard } from "../components/listingFix/ListingFixBetaUsageCard";
 import { ListingFixBetaBadge } from "../components/listingFix/ListingFixBetaBadge";
+import { ListingFixAiProductReview } from "../components/listingFix/ListingFixAiProductReview";
+import type { EditableListingSuggestions } from "../components/listingFix/ListingFixAiProductReview";
 import { ListingFixActionReassurance } from "../components/listingFix/ListingFixActionReassurance";
 import { ListingFixFirstScanPrompt } from "../components/listingFix/ListingFixFirstScanPrompt";
 import { ListingFixTrustPanel } from "../components/listingFix/ListingFixTrustPanel";
@@ -109,7 +110,7 @@ import {
   type IssueRecommendationPair,
 } from "../services/productRecommendations.server";
 
-import type { AiSuggestionsActionData } from "./app.ai-suggestions";
+import type { AiSuggestionsActionData, ProductListingCurrentValues } from "./app.ai-suggestions";
 import type {
   ApplyListingFieldActionData,
   ApplyListingFieldKind,
@@ -117,13 +118,20 @@ import type {
 import type { RestoreScanActionData } from "./app.scan-history";
 
 const APPLY_FIELD_LABELS: Record<ApplyListingFieldKind, string> = {
-  title: "Suggested title",
-  description: "Suggested description",
-  tags: "Suggested tags",
-  seo: "SEO meta description",
+  title: "Title",
+  description: "Description",
+  tags: "Tags",
+  seo: "SEO",
+  all: "All fields",
 };
 
-function formatApplyConfirmation(field: ApplyListingFieldKind): string {
+function formatApplyConfirmation(
+  field: ApplyListingFieldKind,
+  fieldsUpdated?: readonly string[],
+): string {
+  if (field === "all" && fieldsUpdated?.length) {
+    return `Updated in Shopify: ${fieldsUpdated.join(", ")}.`;
+  }
   switch (field) {
     case "title":
       return "Product title updated in Shopify.";
@@ -132,7 +140,9 @@ function formatApplyConfirmation(field: ApplyListingFieldKind): string {
     case "tags":
       return "Product tags updated in Shopify.";
     case "seo":
-      return "SEO meta description updated in Shopify.";
+      return "SEO title and description updated in Shopify.";
+    case "all":
+      return "Selected product fields updated in Shopify.";
     default:
       field satisfies never;
       return "";
@@ -424,6 +434,11 @@ export default function ListingFixHomePage() {
 
   const [highlightFreshAiSuggestions, setHighlightFreshAiSuggestions] =
     useState(false);
+  const [reviewCurrentValues, setReviewCurrentValues] =
+    useState<ProductListingCurrentValues | null>(null);
+  const [editableSuggestions, setEditableSuggestions] =
+    useState<EditableListingSuggestions | null>(null);
+  const [aiReviewSkipped, setAiReviewSkipped] = useState(false);
 
   const [auditByProductId, setAuditByProductId] = useState<
     Record<string, StoredProductAudit>
@@ -718,6 +733,10 @@ export default function ListingFixHomePage() {
       aiIdleData.productId === detailProductId);
 
   const aiSuggestions = aiSuccess ? aiIdleData.suggestions : null;
+  const aiCurrentValues = aiSuccess ? aiIdleData.currentValues : null;
+  const showAiReview =
+    Boolean(aiSuggestions && aiCurrentValues && editableSuggestions) &&
+    !aiReviewSkipped;
   const aiLimitReached = data.usage.aiRemaining <= 0;
 
   const aiLimitError =
@@ -776,6 +795,9 @@ export default function ListingFixHomePage() {
   useEffect(() => {
     setApplyOutcomeBanner(null);
     setHighlightFreshAiSuggestions(false);
+    setReviewCurrentValues(null);
+    setEditableSuggestions(null);
+    setAiReviewSkipped(false);
     if (aiHighlightDismissTimerRef.current != null) {
       window.clearTimeout(aiHighlightDismissTimerRef.current);
       aiHighlightDismissTimerRef.current = null;
@@ -833,6 +855,17 @@ export default function ListingFixHomePage() {
     aiTimerRef.current = null;
     void revalidator.revalidate();
   }, [aiFetcher.data, aiFetcher.state, revalidator, shopDomain]);
+
+  useEffect(() => {
+    if (aiFetcher.state !== "idle") return;
+    const outcome = aiFetcher.data;
+    if (!outcome?.ok) return;
+    if (detailProductId && outcome.productId !== detailProductId) return;
+
+    setReviewCurrentValues(outcome.currentValues);
+    setEditableSuggestions(outcome.suggestions);
+    setAiReviewSkipped(false);
+  }, [aiFetcher.data, aiFetcher.state, detailProductId]);
 
   useEffect(() => {
     if (aiFetcher.state !== "idle") return;
@@ -930,13 +963,43 @@ export default function ListingFixHomePage() {
     }
 
     if (response.ok) {
-      showAppBridgeToast(appBridge, formatApplyConfirmation(response.field));
+      const confirmation = formatApplyConfirmation(
+        response.field,
+        response.fieldsUpdated,
+      );
+      showAppBridgeToast(appBridge, confirmation);
       setApplyOutcomeBanner({
         tone: "success",
         title: `${APPLY_FIELD_LABELS[response.field]} applied`,
-        detail: `${formatApplyConfirmation(response.field)} The catalog refreshes automatically — scan again whenever you want up-to-date scores.`,
+        detail: `${confirmation} The catalog refreshes automatically — scan again whenever you want up-to-date scores.`,
       });
       setApplySuccessBadgeField(response.field);
+
+      if (reviewCurrentValues && editableSuggestions) {
+        const nextCurrent = { ...reviewCurrentValues };
+        for (const fieldName of response.fieldsUpdated) {
+          switch (fieldName) {
+            case "title":
+              nextCurrent.title = editableSuggestions.improvedTitle.trim();
+              break;
+            case "descriptionHtml":
+              nextCurrent.descriptionHtml =
+                editableSuggestions.improvedDescription.trim();
+              break;
+            case "seo.title":
+              nextCurrent.seoTitle = editableSuggestions.seoTitle.trim();
+              break;
+            case "seo.description":
+              nextCurrent.seoDescription =
+                editableSuggestions.seoDescription.trim();
+              break;
+            default:
+              break;
+          }
+        }
+        setReviewCurrentValues(nextCurrent);
+      }
+
       void revalidator.revalidate();
     } else {
       const userErrText =
@@ -966,6 +1029,8 @@ export default function ListingFixHomePage() {
     revalidator,
     shopDomain,
     trackedApplyField,
+    reviewCurrentValues,
+    editableSuggestions,
   ]);
 
   const beginListingFieldApply = useCallback(
@@ -1000,6 +1065,18 @@ export default function ListingFixHomePage() {
     },
     [applyFetcher, detailProductId, shopDomain],
   );
+
+  const handleApplyAllListingFields = useCallback(() => {
+    if (!editableSuggestions) return;
+    beginListingFieldApply("all", () => {
+      const fd = new FormData();
+      fd.set("title", editableSuggestions.improvedTitle);
+      fd.set("descriptionHtml", editableSuggestions.improvedDescription);
+      fd.set("seoTitle", editableSuggestions.seoTitle);
+      fd.set("seoDescription", editableSuggestions.seoDescription);
+      return fd;
+    });
+  }, [beginListingFieldApply, editableSuggestions]);
 
   useEffect(() => {
     if (
@@ -1820,17 +1897,20 @@ export default function ListingFixHomePage() {
                 {!aiErrorMessage &&
                 !aiLimitError &&
                 !aiGenerating &&
-                !aiSuggestions ? (
+                !showAiReview ? (
                   <Banner tone="info" title="Review before you apply">
                     <Text as="p" variant="bodyMd">
-                      Generate recommendations for title, description, tags, and SEO
-                      based on this product&apos;s audit. Edit anything you like before
-                      applying a single field to Shopify.
+                      Generate recommendations for title, description, SEO, and
+                      tags based on this product&apos;s audit. Compare current
+                      Shopify values with AI suggestions, edit anything you
+                      like, then apply one field or all selected fields.
                     </Text>
                   </Banner>
                 ) : null}
 
-                {aiSuggestions ? (
+                {showAiReview &&
+                reviewCurrentValues &&
+                editableSuggestions ? (
                   <div
                     ref={aiResultsAnchorRef}
                     tabIndex={-1}
@@ -1848,153 +1928,17 @@ export default function ListingFixHomePage() {
                         "outline 260ms ease, outline-offset 260ms ease",
                     }}
                   >
-                    <BlockStack gap="400">
-                    <AiSuggestionPreviewBlock
-                      heading="Overview"
-                      value={aiSuggestions.summary}
-                      bodyVariant="paragraph"
+                    <ListingFixAiProductReview
+                      currentValues={reviewCurrentValues}
+                      suggestions={editableSuggestions}
+                      onSuggestionsChange={setEditableSuggestions}
+                      applyInFlight={applyInFlight}
+                      applySuccessBadgeField={applySuccessBadgeField}
+                      isListingFieldApplyBusy={isListingFieldApplyBusy}
+                      onApplyField={beginListingFieldApply}
+                      onApplyAll={handleApplyAllListingFields}
+                      onSkip={() => setAiReviewSkipped(true)}
                     />
-
-                    <AiSuggestionPreviewBlock
-                      heading="Suggested title"
-                      value={aiSuggestions.improvedTitle}
-                      bodyVariant="paragraph"
-                      applyBusy={isListingFieldApplyBusy("title")}
-                      applySuccessPulse={applySuccessBadgeField === "title"}
-                      disableApply={
-                        aiSuggestions.improvedTitle.trim().length === 0 ||
-                        applyInFlight
-                      }
-                      onApplyToShopify={() =>
-                        beginListingFieldApply("title", () => {
-                          const fd = new FormData();
-                          fd.set("value", aiSuggestions.improvedTitle);
-                          return fd;
-                        })
-                      }
-                    />
-
-                    <AiSuggestionPreviewBlock
-                      heading="Suggested description"
-                      value={aiSuggestions.improvedDescription}
-                      bodyVariant="preformatted"
-                      applyBusy={isListingFieldApplyBusy("description")}
-                      applySuccessPulse={applySuccessBadgeField === "description"}
-                      disableApply={
-                        aiSuggestions.improvedDescription.trim().length === 0 ||
-                        applyInFlight
-                      }
-                      onApplyToShopify={() =>
-                        beginListingFieldApply("description", () => {
-                          const fd = new FormData();
-                          fd.set("value", aiSuggestions.improvedDescription);
-                          return fd;
-                        })
-                      }
-                    />
-
-                    <AiSuggestionPreviewBlock
-                      heading="SEO meta description"
-                      value={aiSuggestions.seoDescription}
-                      bodyVariant="paragraph"
-                      footnote={
-                        <>
-                          Targets the search listing description shown in Shopify
-                          admin (product SEO description). Existing SEO titles are
-                          preserved when possible.
-                        </>
-                      }
-                      applyBusy={isListingFieldApplyBusy("seo")}
-                      applySuccessPulse={applySuccessBadgeField === "seo"}
-                      disableApply={
-                        aiSuggestions.seoDescription.trim().length === 0 ||
-                        applyInFlight
-                      }
-                      onApplyToShopify={() =>
-                        beginListingFieldApply("seo", () => {
-                          const fd = new FormData();
-                          fd.set("value", aiSuggestions.seoDescription);
-                          return fd;
-                        })
-                      }
-                    />
-
-                    <BlockStack gap="200">
-                      <InlineStack
-                        align="space-between"
-                        blockAlign="start"
-                        gap="300"
-                        wrap
-                      >
-                        <BlockStack gap="050">
-                          <InlineStack gap="200" wrap blockAlign="center">
-                            <Text variant="headingSm" as="h4">
-                              Suggested tags
-                            </Text>
-                            {applySuccessBadgeField === "tags" ? (
-                              <Badge tone="success">Synced</Badge>
-                            ) : null}
-                          </InlineStack>
-                          <Text as="p" variant="bodySm" tone="subdued">
-                            Applying replaces every tag currently on this product —
-                            preview in Shopify afterward if unsure.
-                          </Text>
-                        </BlockStack>
-
-                        <InlineStack gap="200" wrap blockAlign="center">
-                          <Button
-                            variant="primary"
-                            size="slim"
-                            loading={isListingFieldApplyBusy("tags")}
-                            disabled={
-                              aiSuggestions.suggestedTags.length === 0 ||
-                              applyInFlight
-                            }
-                            onClick={() =>
-                              beginListingFieldApply("tags", () => {
-                                const fd = new FormData();
-                                fd.set(
-                                  "tagsJson",
-                                  JSON.stringify(aiSuggestions.suggestedTags),
-                                );
-                                return fd;
-                              })
-                            }
-                          >
-                            Apply to Shopify
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            size="slim"
-                            disabled={
-                              aiSuggestions.suggestedTags.length === 0
-                            }
-                            onClick={() =>
-                              void navigator.clipboard.writeText(
-                                aiSuggestions.suggestedTags.join(", "),
-                              )
-                            }
-                          >
-                            Copy all
-                          </Button>
-                        </InlineStack>
-                      </InlineStack>
-                      <ListingFixActionReassurance message={REASSURANCE.apply} />
-
-                      {aiSuggestions.suggestedTags.length === 0 ? (
-                        <Text as="p" variant="bodyMd" tone="subdued">
-                          No alternate tags surfaced — reuse your existing tagging
-                          approach.
-                        </Text>
-                      ) : (
-                        <InlineStack gap="150" wrap>
-                          {aiSuggestions.suggestedTags.map((tag, index) => (
-                            <Badge key={`${tag}-${index}`}>{tag}</Badge>
-                          ))}
-                        </InlineStack>
-                      )}
-                    </BlockStack>
-                  </BlockStack>
                   </div>
                 ) : null}
               </BlockStack>
@@ -2012,103 +1956,6 @@ export default function ListingFixHomePage() {
       </Modal>
     </Page>
     </ListingFixDashboardErrorBoundary>
-  );
-}
-
-function AiSuggestionPreviewBlock({
-  heading,
-  value,
-  bodyVariant,
-  applyBusy,
-  disableApply,
-  applySuccessPulse,
-  onApplyToShopify,
-  footnote,
-}: {
-  heading: string;
-  value: string;
-  bodyVariant: "paragraph" | "preformatted";
-  applyBusy?: boolean;
-  disableApply?: boolean;
-  applySuccessPulse?: boolean;
-  onApplyToShopify?: () => void;
-  footnote?: ReactNode;
-}) {
-  const canApply = typeof onApplyToShopify === "function";
-
-  const copyDisabled = value.trim().length === 0;
-
-  return (
-    <BlockStack gap="100">
-      <InlineStack align="space-between" blockAlign="start" gap="300" wrap>
-        <BlockStack gap="050">
-          <InlineStack gap="200" wrap blockAlign="center">
-            <Text variant="headingSm" as="h4">
-              {heading}
-            </Text>
-            {applySuccessPulse ? (
-              <Badge tone="success">Synced</Badge>
-            ) : null}
-          </InlineStack>
-          {footnote ? (
-            <Box maxWidth="620px">
-              <Text as="p" variant="bodySm" tone="subdued">
-                {footnote}
-              </Text>
-            </Box>
-          ) : null}
-        </BlockStack>
-        <InlineStack gap="200" wrap blockAlign="center">
-          {canApply ? (
-            <Button
-              size="slim"
-              variant="primary"
-              loading={applyBusy}
-              disabled={Boolean(disableApply || applyBusy)}
-              onClick={() => onApplyToShopify?.()}
-            >
-              Apply to Shopify
-            </Button>
-          ) : null}
-          <Button
-            variant="secondary"
-            size="slim"
-            disabled={copyDisabled}
-            onClick={() =>
-              void navigator.clipboard.writeText(value).catch(() => {
-                // Clipboard may be unavailable inside some embedded frames.
-              })
-            }
-          >
-            Copy
-          </Button>
-        </InlineStack>
-      </InlineStack>
-      {canApply ? (
-        <ListingFixActionReassurance message={REASSURANCE.apply} />
-      ) : null}
-      <Card padding="400">
-        {bodyVariant === "preformatted" ? (
-          <pre
-            style={{
-              margin: 0,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              fontFamily:
-                '"Inter", ui-sans-serif, system-ui, -apple-system, sans-serif',
-              fontSize: "0.9375rem",
-              lineHeight: 1.4,
-            }}
-          >
-            {value}
-          </pre>
-        ) : (
-          <Text as="p" variant="bodyMd" breakWord>
-            {value}
-          </Text>
-        )}
-      </Card>
-    </BlockStack>
   );
 }
 

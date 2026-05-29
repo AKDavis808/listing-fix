@@ -12,6 +12,10 @@ export const LISTING_PRODUCTS_QUERY = `#graphql
         productType
         descriptionHtml
         tags
+        seo {
+          title
+          description
+        }
         variantsCount {
           count
         }
@@ -28,6 +32,8 @@ export type CatalogProductSnapshot = {
   productType: string;
   tags: string[];
   variantsCount: number;
+  seoTitle: string | null;
+  seoDescription: string | null;
 };
 
 /** Payload for the browser — description is never shipped to the client. */
@@ -71,6 +77,18 @@ function coerceCatalogProduct(
       ? node.descriptionHtml
       : null;
 
+  const seoNode = node.seo as
+    | { title?: unknown; description?: unknown }
+    | undefined;
+  const seoTitle =
+    seoNode && typeof seoNode.title === "string"
+      ? seoNode.title.trim() || null
+      : null;
+  const seoDescription =
+    seoNode && typeof seoNode.description === "string"
+      ? seoNode.description.trim() || null
+      : null;
+
   return {
     id,
     title,
@@ -79,6 +97,8 @@ function coerceCatalogProduct(
     productType,
     tags,
     variantsCount,
+    seoTitle,
+    seoDescription,
   };
 }
 
@@ -93,6 +113,8 @@ export function toClientCatalogRow(
     productType: snapshot.productType,
     tags: snapshot.tags,
     variantsCount: snapshot.variantsCount,
+    seoTitle: snapshot.seoTitle,
+    seoDescription: snapshot.seoDescription,
   };
 }
 
@@ -117,6 +139,10 @@ export async function fetchProductById(
         productType
         descriptionHtml
         tags
+        seo {
+          title
+          description
+        }
         variantsCount {
           count
         }

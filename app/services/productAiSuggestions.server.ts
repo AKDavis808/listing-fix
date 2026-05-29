@@ -9,6 +9,7 @@ import type { IssueRecommendationPair } from "./productRecommendations.server";
 export type AiListingImprovements = {
   improvedTitle: string;
   improvedDescription: string;
+  seoTitle: string;
   seoDescription: string;
   suggestedTags: string[];
   summary: string;
@@ -59,6 +60,12 @@ export function parseAiListingImprovements(
           "string"
         ? String((o as { seo_description: string }).seo_description).trim()
         : "";
+  const seoTitleRaw =
+    typeof o.seoTitle === "string"
+      ? o.seoTitle.trim()
+      : typeof (o as { seo_title?: unknown }).seo_title === "string"
+        ? String((o as { seo_title: string }).seo_title).trim()
+        : "";
 
   const tagsRaw = o.suggestedTags;
   const suggestedTags = Array.isArray(tagsRaw)
@@ -84,6 +91,7 @@ export function parseAiListingImprovements(
       error: "AI response missing seoDescription.",
     };
   }
+  const seoTitle = seoTitleRaw || improvedTitle;
   if (!summary) {
     return {
       ok: false,
@@ -96,6 +104,7 @@ export function parseAiListingImprovements(
     value: {
       improvedTitle,
       improvedDescription,
+      seoTitle,
       seoDescription,
       suggestedTags,
       summary,
@@ -107,6 +116,7 @@ const SYSTEM_PROMPT = `You are a professional ecommerce copywriter for Shopify m
 Respond with a single JSON object only (no markdown fence, no preamble). Keys must be exactly:
 - improvedTitle (string)
 - improvedDescription (string): plain language or minimal HTML paragraphs; no markdown.
+- seoTitle (string): search listing title for Shopify SEO, concise and factual.
 - seoDescription (string): search snippet, target max ~155 characters — never invent claims.
 - suggestedTags (array of strings): 5–14 concise storefront tags when helpful; reuse theme of existing tags.
 - summary (string): 2–4 sentences explaining what you changed and why, conservative tone.
@@ -148,7 +158,7 @@ export async function generateProductListingSuggestions(params: {
     system: SYSTEM_PROMPT,
     user:
       user +
-      `\nProduce JSON only with keys: improvedTitle, improvedDescription, seoDescription, suggestedTags, summary.`,
+      `\nProduce JSON only with keys: improvedTitle, improvedDescription, seoTitle, seoDescription, suggestedTags, summary.`,
     temperature: 0.35,
     maxCompletionTokens: 950,
   });

@@ -18,11 +18,19 @@ export type ProductFieldUpdateFailure = {
 
 export type ProductFieldUpdateOk = {
   ok: true;
+  fieldsUpdated: string[];
 };
 
 export type ProductFieldUpdateResult =
   | ProductFieldUpdateOk
   | ProductFieldUpdateFailure;
+
+export type ListingFieldBatchInput = {
+  title?: string;
+  descriptionHtml?: string;
+  seoTitle?: string;
+  seoDescription?: string;
+};
 
 type GraphqlEnvelope<T> = {
   errors?: { message?: string }[];
@@ -55,6 +63,7 @@ async function runProductUpdate(
   admin: AdminGraphQl,
   productId: string,
   patch: Record<string, unknown>,
+  fieldsUpdated: string[],
 ): Promise<ProductFieldUpdateResult> {
   const body: GraphqlEnvelope<{
     productUpdate?: {
@@ -110,7 +119,7 @@ async function runProductUpdate(
     };
   }
 
-  return { ok: true };
+  return { ok: true, fieldsUpdated };
 }
 
 /**
@@ -177,7 +186,7 @@ export async function updateProductTitle(
   if (!trimmed.length) {
     return { ok: false, errorMessage: "Title cannot be empty." };
   }
-  return runProductUpdate(admin, productId, { title: trimmed });
+  return runProductUpdate(admin, productId, { title: trimmed }, ["title"]);
 }
 
 /** Updates only descriptionHtml — does not touch title, SEO, tags, etc. */
@@ -190,7 +199,12 @@ export async function updateProductDescription(
   if (!normalized.length) {
     return { ok: false, errorMessage: "Description cannot be empty." };
   }
-  return runProductUpdate(admin, productId, { descriptionHtml: normalized });
+  return runProductUpdate(
+    admin,
+    productId,
+    { descriptionHtml: normalized },
+    ["descriptionHtml"],
+  );
 }
 
 /** Replaces storefront tags wholesale with supplied list — merchant must deliberately apply. */
@@ -209,7 +223,7 @@ export async function updateProductTags(
       errorMessage: "Shopify permits at most 250 tags per product.",
     };
   }
-  return runProductUpdate(admin, productId, { tags });
+  return runProductUpdate(admin, productId, { tags }, ["tags"]);
 }
 
 type SeoPrefetch =
@@ -304,9 +318,48 @@ async function fetchProductSeoContext(
 }
 
 /**
- * Writes only Shopify search-engine listing meta description (`product.seo.description`).
- * Preserves explicit SEO titles when present — otherwise derives from product title — so Shopify does not silently blank them.
+ * Updates Shopify SEO title and meta description together.
  */
+export async function updateProductSeoFields(
+  admin: AdminGraphQl,
+  productId: string,
+  seoTitle: string,
+  seoDescription: string,
+): Promise<ProductFieldUpdateResult> {
+  const title = seoTitle.trim();
+  const description = seoDescription.trim();
+
+  if (!title.length) {
+    return { ok: false, errorMessage: "SEO title cannot be empty." };
+  }
+  if (!description.length) {
+    return {
+      ok: false,
+      errorMessage: "SEO meta description cannot be empty.",
+    };
+  }
+  if (description.length > 320) {
+    return {
+      ok: false,
+      errorMessage:
+        "SEO meta description exceeds 320 characters and was not submitted.",
+    };
+  }
+
+  return runProductUpdate(
+    admin,
+    productId,
+    {
+      seo: {
+        title,
+        description,
+      },
+    },
+    ["seo.title", "seo.description"],
+  );
+}
+
+/** @deprecated Prefer updateProductSeoFields — kept for single-field callers. */
 export async function updateProductSEO(
   admin: AdminGraphQl,
   productId: string,
@@ -320,27 +373,79 @@ export async function updateProductSEO(
     };
   }
 
-  if (trimmed.length > 320) {
-    return {
-      ok: false,
-      errorMessage:
-        "SEO meta description exceeds 320 characters and was not submitted.",
-    };
-  }
-
   const seoContext = await fetchProductSeoContext(admin, productId);
   if (!seoContext.ok) {
     return seoContext;
   }
 
-  const { productTitle, seoTitle } = seoContext;
+  const seoTitleToSend = seoContext.seoTitle ?? seoContext.productTitle;
+  return updateProductSeoFields(admin, productId, seoTitleToSend, trimmed);
+}
 
-  const seoTitleToSend = seoTitle ?? productTitle;
+export async function applyApprovedListingFields(
+  admin: AdminGraphQl,
+  productId: string,
+  input: ListingFieldBatchInput,
+): Promise<ProductFieldUpdateResult> {
+  const patch: Record<string, unknown> = {};
+  const fieldsUpdated: string[] = [];
 
-  return runProductUpdate(admin, productId, {
-    seo: {
-      title: seoTitleToSend,
-      description: trimmed,
-    },
-  });
+  if (typeof input.title === "string" && input.title.trim().length) {
+    patch.title = input.title.trim();
+    fieldsUpdated.push("title");
+  }
+
+  if (
+    typeof input.descriptionHtml === "string" &&
+    input.descriptionHtml.trim().length
+  ) {
+    const normalized = normalizeDescriptionHtmlForShopify(input.descriptionHtml);
+    if (!normalized.length) {
+      return { ok: false, errorMessage: "Description cannot be empty." };
+    }
+    patch.descriptionHtml = normalized;
+    fieldsUpdated.push("descriptionHtml");
+  }
+
+  const seoTitle =
+    typeof input.seoTitle === "string" ? input.seoTitle.trim() : "";
+  const seoDescription =
+    typeof input.seoDescription === "string"
+      ? input.seoDescription.trim()
+      : "";
+
+  if (seoTitle.length || seoDescription.length) {
+    if (!seoTitle.length || !seoDescription.length) {
+      return {
+        ok: false,
+        errorMessage: "SEO updates require both title and description.",
+      };
+    }
+    if (seoDescription.length > 320) {
+      return {
+        ok: false,
+        errorMessage:
+          "SEO meta description exceeds 320 characters and was not submitted.",
+      };
+    }
+    patch.seo = { title: seoTitle, description: seoDescription };
+    fieldsUpdated.push("seo.title", "seo.description");
+  }
+
+  if (fieldsUpdated.length === 0) {
+    return {
+      ok: false,
+      errorMessage: "Select at least one non-empty field to apply.",
+    };
+  }
+
+  const outcome = await runProductUpdate(admin, productId, patch, fieldsUpdated);
+  if (!outcome.ok) {
+    return outcome;
+  }
+
+  return {
+    ok: true,
+    fieldsUpdated: outcome.fieldsUpdated,
+  };
 }
